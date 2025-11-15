@@ -3,9 +3,9 @@
 #include "xdpw.h"
 #include "logger.h"
 
-#include "wlr-layer-shell-unstable-v1-client.h"
-#include "pointer-constraints-unstable-v1-client.h"
-#include "keyboard-shortcuts-inhibit-unstable-v1-client.h"
+#include "wlr-layer-shell-unstable-v1-client-protocol.h"
+#include "pointer-constraints-unstable-v1-client-protocol.h"
+#include "keyboard-shortcuts-inhibit-unstable-v1-client-protocol.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -27,7 +27,7 @@
 
 #define VOID_RETURN ""
 
-static const char *INPUTCAPTURE_INTERFACE_NAME = "org.freedesktop.impl.portal.InputCapture";
+static const char *INPUTCAPTURE_INTERFACE_NAME = "org.freedesktop.portal.InputCapture";
 static const char *REQUEST_INTERFACE_NAME = "org.freedesktop.impl.portal.Request";
 static const char *SESSION_INTERFACE_NAME = "org.freedesktop.impl.portal.Session";
 static const char *OBJECT_PATH_NAME = "/org/freedesktop/portal/desktop";
@@ -84,17 +84,11 @@ static void output_handle_done(void *, struct wl_output *);
 static void output_handle_scale(void *, struct wl_output *, int32_t);
 
 /* --- dbus vtable --- */
-static const sd_bus_vtable portal_vtable[] = {
+static const sd_bus_vtable input_capture_vtable[] = {
   SD_BUS_VTABLE_START(0),
-  SD_BUS_METHOD("CreateSession", SD_BUS_TYPE_STRING SD_BUS_TYPE_ARRAY SD_BUS_TYPE_DICT_ENTRY_BEGIN SD_BUS_TYPE_STRING SD_BUS_TYPE_VARIANT SD_BUS_TYPE_DICT_ENTRY_END, SD_BUS_TYPE_OBJECT_PATH, dbus_method_CreateSession, SD_BUS_VTABLE_UNPRIVILEGED),
   SD_BUS_PROPERTY("SupportedCapabilities", SD_BUS_TYPE_UINT32, dbus_property_SupportedCapabilities, offsetof(struct InputCaptureData, capabilities), SD_BUS_VTABLE_PROPERTY_CONST),
   SD_BUS_PROPERTY("version", SD_BUS_TYPE_UINT32, dbus_property_version, offsetof(struct InputCaptureData, version), SD_BUS_VTABLE_PROPERTY_CONST),
-  SD_BUS_VTABLE_END,
-};
-
-static const sd_bus_vtable session_vtable[] = {
-  SD_BUS_VTABLE_START(0),
-  SD_BUS_METHOD("Close", "", "", dbus_method_Close, SD_BUS_VTABLE_UNPRIVILEGED),
+  SD_BUS_METHOD("CreateSession", SD_BUS_TYPE_STRING SD_BUS_TYPE_ARRAY SD_BUS_TYPE_DICT_ENTRY_BEGIN SD_BUS_TYPE_STRING SD_BUS_TYPE_VARIANT SD_BUS_TYPE_DICT_ENTRY_END, SD_BUS_TYPE_OBJECT_PATH, dbus_method_CreateSession, SD_BUS_VTABLE_UNPRIVILEGED),
   SD_BUS_METHOD("GetZones", SD_BUS_TYPE_OBJECT_PATH SD_BUS_TYPE_ARRAY SD_BUS_TYPE_DICT_ENTRY_BEGIN SD_BUS_TYPE_STRING SD_BUS_TYPE_VARIANT SD_BUS_TYPE_DICT_ENTRY_END, SD_BUS_TYPE_OBJECT_PATH, dbus_method_GetZones, SD_BUS_VTABLE_UNPRIVILEGED),
   SD_BUS_METHOD("SetPointerBarriers", SD_BUS_TYPE_OBJECT_PATH SD_BUS_TYPE_ARRAY SD_BUS_TYPE_DICT_ENTRY_BEGIN SD_BUS_TYPE_STRING SD_BUS_TYPE_VARIANT SD_BUS_TYPE_DICT_ENTRY_END SD_BUS_TYPE_ARRAY SD_BUS_TYPE_ARRAY SD_BUS_TYPE_DICT_ENTRY_BEGIN SD_BUS_TYPE_STRING SD_BUS_TYPE_VARIANT SD_BUS_TYPE_DICT_ENTRY_END SD_BUS_TYPE_UINT32, SD_BUS_TYPE_OBJECT_PATH, dbus_method_SetPointerBarriers, SD_BUS_VTABLE_UNPRIVILEGED),
   SD_BUS_METHOD("Enable", SD_BUS_TYPE_OBJECT_PATH SD_BUS_TYPE_ARRAY SD_BUS_TYPE_DICT_ENTRY_BEGIN SD_BUS_TYPE_STRING SD_BUS_TYPE_VARIANT SD_BUS_TYPE_DICT_ENTRY_END, VOID_RETURN, dbus_method_Enable, SD_BUS_VTABLE_UNPRIVILEGED),
@@ -105,6 +99,12 @@ static const sd_bus_vtable session_vtable[] = {
   SD_BUS_SIGNAL("Activated", SD_BUS_TYPE_OBJECT_PATH SD_BUS_TYPE_ARRAY SD_BUS_TYPE_DICT_ENTRY_BEGIN SD_BUS_TYPE_STRING SD_BUS_TYPE_VARIANT SD_BUS_TYPE_DICT_ENTRY_END, 0),
   SD_BUS_SIGNAL("Deactivated", SD_BUS_TYPE_OBJECT_PATH SD_BUS_TYPE_ARRAY SD_BUS_TYPE_DICT_ENTRY_BEGIN SD_BUS_TYPE_STRING SD_BUS_TYPE_VARIANT SD_BUS_TYPE_DICT_ENTRY_END, 0),
   SD_BUS_SIGNAL("ZonesChanged", SD_BUS_TYPE_OBJECT_PATH SD_BUS_TYPE_ARRAY SD_BUS_TYPE_DICT_ENTRY_BEGIN SD_BUS_TYPE_STRING SD_BUS_TYPE_VARIANT SD_BUS_TYPE_DICT_ENTRY_END, 0),
+  SD_BUS_VTABLE_END,
+};
+
+static const sd_bus_vtable session_vtable[] = {
+  SD_BUS_VTABLE_START(0),
+  SD_BUS_METHOD("Close", "", "", dbus_method_Close, SD_BUS_VTABLE_UNPRIVILEGED),
   SD_BUS_VTABLE_END,
 };
 
@@ -1641,7 +1641,7 @@ int xdpw_input_capture_init(struct xdpw_state *state) {
     NULL,
     OBJECT_PATH_NAME,
     INPUTCAPTURE_INTERFACE_NAME,
-    portal_vtable,
+    input_capture_vtable,
     &interface_data
   );
 
