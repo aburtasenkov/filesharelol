@@ -16,6 +16,7 @@
 #include <unistd.h>
 #include <sys/epoll.h>
 #include <sys/mman.h>
+#include <sys/socket.h>
 
 static const char *INPUTCAPTURE_INTERFACE_NAME = "org.freedesktop.impl.portal.InputCapture";
 static const char *SESSION_INTERFACE_NAME = "org.freedesktop.impl.portal.Session";
@@ -50,25 +51,58 @@ static int dbus_method_Enable(sd_bus_message *, void *, sd_bus_error *);
 static int dbus_method_Disable(sd_bus_message *, void *, sd_bus_error *);
 static int dbus_method_Release(sd_bus_message *, void *, sd_bus_error *);
 static int dbus_method_ConnectToEIS(sd_bus_message *, void *, sd_bus_error *);
-static int dbus_signal_Disabled(sd_bus *, const char *)  __attribute__((unused));
-static int dbus_signal_Activated(sd_bus *, const char *);
-static int dbus_signal_Deactivated(sd_bus *, const char *);
+
+// signal helpers
+static int dbus_signal_Activated(sd_bus *, struct SessionContext *, uint32_t, double, double);
+static int dbus_signal_Deactivated(sd_bus *, struct SessionContext *, double, double);
 static int dbus_signal_ZonesChanged(sd_bus *, const char *);
+static int dbus_signal_Disabled(sd_bus *, const char *) __attribute__((unused));
+
 static int dbus_helper_drain_dict(sd_bus_message *);
 static int dbus_helper_parse_CreateSession_options(sd_bus_message *, uint32_t *);
-static int dbus_helper_emit_signal(sd_bus *, const char *, const char *);
+static int dbus_helper_parse_Release_options(sd_bus_message *, uint32_t *, double *, double *);
 static struct SessionContext* eis_helper_find_session(const char *);
 static void eis_helper_handle_event(struct eis_event *);
-// static int dbus_method_Close(sd_bus_message *, void *, sd_bus_error *) __attribute__((unused));
+
+static void wayland_handle_layer_surface_configure(void *, struct zwlr_layer_surface_v1 *, uint32_t, uint32_t, uint32_t);
+static void wayland_handle_layer_surface_closed(void *, struct zwlr_layer_surface_v1 *);
+
 static void wayland_registry_global(void *, struct wl_registry *, uint32_t, const char *, uint32_t);
 static void wayland_registry_global_remove(void *, struct wl_registry *, uint32_t);
 static void cleanup_session_wayland(struct SessionContext *);
-static void sc_free(struct SessionContext *);
+
+static void wayland_handle_pointer_enter(void *, struct wl_pointer *, uint32_t, struct wl_surface *, wl_fixed_t, wl_fixed_t);
+static void wayland_handle_pointer_leave(void *, struct wl_pointer *, uint32_t, struct wl_surface *);
+static void wayland_handle_pointer_motion(void *, struct wl_pointer *, uint32_t, wl_fixed_t, wl_fixed_t);
+static void wayland_handle_pointer_button(void *, struct wl_pointer *, uint32_t, uint32_t, uint32_t, uint32_t);
+static void wayland_handle_pointer_axis(void *, struct wl_pointer *, uint32_t, uint32_t, wl_fixed_t);
+
+static void wayland_handle_keyboard_keymap(void *, struct wl_keyboard *, uint32_t, int32_t, uint32_t);
+static void wayland_handle_keyboard_enter(void *, struct wl_keyboard *, uint32_t, struct wl_surface *, struct wl_array *);
+static void wayland_handle_keyboard_leave(void *, struct wl_keyboard *, uint32_t, struct wl_surface *);
+static void wayland_handle_keyboard_key(void *, struct wl_keyboard *, uint32_t, uint32_t, uint32_t, uint32_t);
+static void wayland_handle_keyboard_modifiers(void *, struct wl_keyboard *, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t);
+static void wayland_handle_keyboard_repeat(void *, struct wl_keyboard *, int32_t, int32_t);
+
+static void wayland_handle_seat_capabilities(void *, struct wl_seat *, uint32_t);
+static void wayland_handle_seat_name(void *, struct wl_seat *, const char *);
+
+static void wayland_handle_inhibitor_active(void *, struct zwp_keyboard_shortcuts_inhibitor_v1 *);
+static void wayland_handle_inhibitor_inactive(void *, struct zwp_keyboard_shortcuts_inhibitor_v1 *);
+
+static void wayland_handle_locked_pointer_locked(void *, struct zwp_locked_pointer_v1 *);
+static void wayland_handle_locked_pointer_unlocked(void *, struct zwp_locked_pointer_v1 *);
 
 static void output_handle_geometry(void *, struct wl_output *, int32_t, int32_t, int32_t, int32_t, int32_t, const char *, const char *, int32_t);
 static void output_handle_mode(void *, struct wl_output *, uint32_t, int32_t, int32_t, int32_t);
 static void output_handle_done(void *, struct wl_output *);
 static void output_handle_scale(void *, struct wl_output *, int32_t);
+
+// SessionContext object constructor and destructor
+static struct SessionContext *sc_create(const char *, const char *, const char *, const char *, uint32_t);
+static void sc_free(struct SessionContext *);
+
+static void free_barrier_list(struct Barrier *);
 
 /* --- dbus vtable --- */
 static const sd_bus_vtable input_capture_vtable[] = {
@@ -89,15 +123,7 @@ static const sd_bus_vtable input_capture_vtable[] = {
   SD_BUS_VTABLE_END,
 };
 
-// static const sd_bus_vtable session_vtable[] = {
-//   SD_BUS_VTABLE_START(0),
-//   SD_BUS_METHOD("Close", "", "", dbus_method_Close, SD_BUS_VTABLE_UNPRIVILEGED),
-//   SD_BUS_VTABLE_END,
-// };
-
 /* --- Wayland listeners --- */
-static void wayland_handle_layer_surface_configure(void *, struct zwlr_layer_surface_v1 *, uint32_t, uint32_t, uint32_t);
-static void wayland_handle_layer_surface_closed(void *, struct zwlr_layer_surface_v1 *);
 static const struct zwlr_layer_surface_v1_listener layer_surface_listener = {
   .configure = wayland_handle_layer_surface_configure,
   .closed = wayland_handle_layer_surface_closed
@@ -108,11 +134,6 @@ static const struct wl_registry_listener registry_listener = {
   .global_remove = wayland_registry_global_remove
 };
 
-static void wayland_handle_pointer_enter(void *, struct wl_pointer *, uint32_t, struct wl_surface *, wl_fixed_t, wl_fixed_t);
-static void wayland_handle_pointer_leave(void *, struct wl_pointer *, uint32_t, struct wl_surface *);
-static void wayland_handle_pointer_motion(void *, struct wl_pointer *, uint32_t, wl_fixed_t, wl_fixed_t);
-static void wayland_handle_pointer_button(void *, struct wl_pointer *, uint32_t, uint32_t, uint32_t, uint32_t);
-static void wayland_handle_pointer_axis(void *, struct wl_pointer *, uint32_t, uint32_t, wl_fixed_t);
 static const struct wl_pointer_listener pointer_listener = {
   .enter = wayland_handle_pointer_enter,
   .leave = wayland_handle_pointer_leave,
@@ -121,12 +142,6 @@ static const struct wl_pointer_listener pointer_listener = {
   .axis = wayland_handle_pointer_axis
 };
 
-static void wayland_handle_keyboard_keymap(void *, struct wl_keyboard *, uint32_t, int32_t, uint32_t);
-static void wayland_handle_keyboard_enter(void *, struct wl_keyboard *, uint32_t, struct wl_surface *, struct wl_array *);
-static void wayland_handle_keyboard_leave(void *, struct wl_keyboard *, uint32_t, struct wl_surface *);
-static void wayland_handle_keyboard_key(void *, struct wl_keyboard *, uint32_t, uint32_t, uint32_t, uint32_t);
-static void wayland_handle_keyboard_modifiers(void *, struct wl_keyboard *, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t);
-static void wayland_handle_keyboard_repeat(void *, struct wl_keyboard *, int32_t, int32_t);
 static const struct wl_keyboard_listener keyboard_listener = {
   .keymap = wayland_handle_keyboard_keymap,
   .enter = wayland_handle_keyboard_enter,
@@ -136,26 +151,16 @@ static const struct wl_keyboard_listener keyboard_listener = {
   .repeat_info = wayland_handle_keyboard_repeat
 };
 
-static void wayland_handle_seat_capabilities(void *, struct wl_seat *, uint32_t);
-static void wayland_handle_seat_name(void *, struct wl_seat *, const char *);
 static const struct wl_seat_listener seat_listener = {
   .capabilities = wayland_handle_seat_capabilities,
   .name = wayland_handle_seat_name
 };
 
-static void wayland_handle_inhibitor_active(void *, struct zwp_keyboard_shortcuts_inhibitor_v1 *);
-static void wayland_handle_inhibitor_inactive(void *, struct zwp_keyboard_shortcuts_inhibitor_v1 *);
 static const struct zwp_keyboard_shortcuts_inhibitor_v1_listener inhibitor_listener = {
   .active = wayland_handle_inhibitor_active,
   .inactive = wayland_handle_inhibitor_inactive
 };
 
-static void wayland_handle_locked_pointer_locked(void *data, struct zwp_locked_pointer_v1 *locked_pointer) {
-  logprint(DEBUG, "Wayland: Pointer locked");
-}
-static void wayland_handle_locked_pointer_unlocked(void *data, struct zwp_locked_pointer_v1 *locked_pointer) {
-  logprint(DEBUG, "Wayland: Pointer unlocked");
-}
 static const struct zwp_locked_pointer_v1_listener locked_pointer_listener = {
   .locked = wayland_handle_locked_pointer_locked,
   .unlocked = wayland_handle_locked_pointer_unlocked
@@ -218,31 +223,6 @@ static struct SessionContext *sc_create(const char *handle, const char *session_
 
   return context;
 }
-
-// static int dbus_method_Close(sd_bus_message *m, void *userdata, sd_bus_error *ret_error) {
-//   (void)ret_error;
-//   struct SessionContext *context = (struct SessionContext *)userdata;
-//   logprint(DEBUG, "Closing session (handle: %s)", context->handle_token ? context->handle_token : "UNDEFINED");
-
-//   struct SessionContext **p = &interface_data.session_list_head;
-//   while (*p) {
-//     if (*p == context) {
-//       *p = context->next;
-//       break;
-//     }
-//     p = &(*p)->next;
-//   }
-
-//   if (context->enabled) {
-//     cleanup_session_wayland(context);
-//     interface_data.active_session = NULL;
-//   }
-
-//   sd_bus_slot_unref(context->slot); 
-//   sc_free(context);
-
-//   return sd_bus_reply_method_return(m, NULL);
-// }
 
 /*--------------------------------------------- Properties ------------------------------------------------------------*/
 static int dbus_property_SupportedCapabilities(sd_bus *bus, const char *path, const char *interface, 
@@ -475,10 +455,6 @@ static int dbus_method_GetZones(sd_bus_message *m, void *userdata, sd_bus_error 
     sd_bus_error_setf(ret_error, "org.freedesktop.portal.Error.NotFound", "session_handle %s not found", session_handle);
     return -ENOENT;
   }
-
-  // update zone set version
-  if (context->zone_set_id == 0) context->zone_set_id = 1;
-  else context->zone_set_id += 1;
 
   logprint(DEBUG, "GetZones: Reporting zone_set %u for session %s", context->zone_set_id, session_handle);
 
@@ -827,7 +803,14 @@ static int dbus_method_Enable(sd_bus_message *m, void *userdata, sd_bus_error *r
   context->enabled = true;
   interface_data.active_session = context;
 
-  dbus_signal_Activated(interface_data.bus, session_handle);
+  double cursor_x = wl_fixed_to_double(context->last_pointer_x);
+  double cursor_y = wl_fixed_to_double(context->last_pointer_y);
+
+  dbus_signal_Activated(interface_data.bus, context, 0, cursor_x, cursor_y);
+
+  if (context->device) {
+    eis_device_start_emulating(context->device, context->activation_id);
+  }
 
 send_reply:
   r = sd_bus_message_new_method_return(m, &reply);
@@ -916,15 +899,21 @@ int r;
     goto send_reply;
   }
 
-  cleanup_session_wayland(context);
+  double final_x = wl_fixed_to_double(context->last_pointer_x);
+  double final_y = wl_fixed_to_double(context->last_pointer_y);
 
+  cleanup_session_wayland(context);
   context->enabled = false;
 
   if (interface_data.active_session == context) {
     interface_data.active_session = NULL;
   }
 
-  dbus_signal_Deactivated(interface_data.bus, session_handle);
+  if (context->device) {
+    eis_device_stop_emulating(context->device);
+  }
+
+  dbus_signal_Deactivated(interface_data.bus, context, final_x, final_y);
 
 send_reply:
   r = sd_bus_message_new_method_return(m, &reply);
@@ -1072,7 +1061,6 @@ static int dbus_method_ConnectToEIS(sd_bus_message *m, void *userdata, sd_bus_er
   int r;
   const char *session_handle = NULL;
   const char *app_id = NULL;
-
   struct SessionContext *context = NULL;
   sd_bus_message *reply = NULL;
 
@@ -1088,75 +1076,202 @@ static int dbus_method_ConnectToEIS(sd_bus_message *m, void *userdata, sd_bus_er
     sd_bus_error_setf(ret_error, "org.freedesktop.portal.Error.NotFound", "Session handle '%s' not found", session_handle);
     return -ENOENT;
   }
-
+  
   logprint(DEBUG, "ConnectToEIS: Setting up EIS socket for session %s (app: %s)", session_handle, app_id);
 
-  int eis_fd = eis_get_fd(interface_data.eis_context);
-  if (eis_fd < 0) {
-    logprint(ERROR, "Could not get eis file descriptor for %s session_handle", session_handle);
-    sd_bus_error_setf(ret_error, SD_BUS_ERROR_FAILED, "Eis context is not valid");
-    return -EBADF;
-  }
-
-  int client_fd = dup(eis_fd);
+  int client_fd = eis_backend_fd_add_client(interface_data.eis_context);
   if (client_fd < 0) {
-    sd_bus_error_setf(ret_error, SD_BUS_ERROR_FAILED, "Failed to dup EIS fd: %s", strerror(errno));
+    sd_bus_error_setf(ret_error, "org.freedesktop.portal.Error.Failed", "Failed to add EIS client: %s", strerror(-client_fd));
+    return -EOPNOTSUPP;
   }
 
-  return sd_bus_reply_method_return(m, "h", client_fd);
-}
-
-
-static int dbus_helper_emit_signal(sd_bus *bus, const char *signal_name, const char *session_handle) {
-  int r;
-  sd_bus_message *m;
-
-  r = sd_bus_message_new_signal(bus, &m, OBJECT_PATH_NAME, INPUTCAPTURE_INTERFACE_NAME, signal_name);
+  r = sd_bus_message_new_method_return(m, &reply);
   if (r < 0) {
-    logprint(ERROR, "Error creating %s signal message: %s", signal_name, strerror(-r));
+    close(client_fd);
     return r;
   }
 
-  r = sd_bus_message_append(m, "o", session_handle);
-  if (r < 0) {
-    logprint(ERROR, "Error appending session_handle %s to %s signal message: %s", session_handle, signal_name, strerror(-r));
-    goto finish;
-  }
+  r = sd_bus_message_append(reply, "h", client_fd);
+  if (r < 0) goto cleanup;
 
-  r = sd_bus_message_append(m, "a" "{" "s" "v" "}", 0); // Passing 0 indicates an empty container
-  if (r < 0) {
-    logprint(ERROR, "Error appending empty dictionary to %s signal message: %s", signal_name, strerror(-r));
-    goto finish;
-  }
+  r = sd_bus_send(sd_bus_message_get_bus(m), reply, NULL);
 
-  r = sd_bus_send(bus, m, NULL);
-finish:
-  sd_bus_message_unref(m);
+cleanup:
+  sd_bus_message_unref(reply);
+  close(client_fd);
+
   return r;
 }
 
 static int dbus_signal_Disabled(sd_bus *bus, const char *session_handle)
 {
-  logprint(DEBUG, "Emitting Disabled signal");
-  return dbus_helper_emit_signal(bus, "Disabled", session_handle);
+  int r;
+  sd_bus_message *signal = NULL;
+
+  logprint(DEBUG, "Emitting Disabled signal for session %s", session_handle);
+
+  r = sd_bus_message_new_signal(bus, &signal, OBJECT_PATH_NAME, INPUTCAPTURE_INTERFACE_NAME, "Disabled");
+  if (r < 0) {
+    logprint(ERROR, "Error creating Disabled signal: %s", strerror(-r));
+    return r;
+  }
+
+  r = sd_bus_message_append(signal, "o", session_handle);
+  if (r < 0) goto cleanup;
+
+  r = sd_bus_message_open_container(signal, 'a', "{sv}");
+  if (r < 0) goto cleanup;
+  r = sd_bus_message_close_container(signal);
+  if (r < 0) goto cleanup;
+
+  r = sd_bus_send(bus, signal, NULL);
+  if (r < 0) {
+    logprint(ERROR, "Failed to send Disabled signal: %s", strerror(-r));
+  }
+cleanup:
+  sd_bus_message_unref(signal);
+  return r;
 }
 
-static int dbus_signal_Activated(sd_bus *bus, const char *session_handle)
+static int dbus_signal_Activated(sd_bus *bus, struct SessionContext *context, uint32_t barrier_id, double cursor_x, double cursor_y)
 {
-  logprint(DEBUG, "Emitting Activated signal");
-  return dbus_helper_emit_signal(bus, "Activated", session_handle);
+  int r;
+  sd_bus_message *signal = NULL;
+
+  context->activation_id++;
+
+  logprint(DEBUG, "Emitting Activated signal for session %s (ID: %u, Barrier %u)", context->session_handle, context->activation_id, barrier_id);
+
+  r = sd_bus_message_new_signal(bus, &signal, OBJECT_PATH_NAME, INPUTCAPTURE_INTERFACE_NAME, "Activated");
+  if (r < 0) {
+    logprint(ERROR, "Error creating Activated signal: %s", strerror(-r));
+    return r;
+  }
+
+  r = sd_bus_message_append(signal, "o", context->session_handle);
+  if (r < 0) goto cleanup;
+
+  r = sd_bus_message_open_container(signal, 'a', "{sv}");
+  if (r < 0) goto cleanup;
+
+  sd_bus_message_open_container(signal, 'e', "sv");
+  sd_bus_message_append(signal, "s", "activation_id");
+  sd_bus_message_open_container(signal, 'v', "u");
+  sd_bus_message_append(signal, "u", context->activation_id);
+  sd_bus_message_close_container(signal);
+  sd_bus_message_close_container(signal);
+
+  sd_bus_message_open_container(signal, 'e', "sv");
+  sd_bus_message_append(signal, "s", "cursor_position");
+
+  sd_bus_message_open_container(signal, 'v', "(dd)");
+  sd_bus_message_open_container(signal, 'r', "dd");
+  sd_bus_message_append(signal, "d", cursor_x);
+  sd_bus_message_append(signal, "d", cursor_y);
+  sd_bus_message_close_container(signal);
+  sd_bus_message_close_container(signal);
+  sd_bus_message_close_container(signal);
+
+  // only append if a valid barrier_id was passed
+  if (barrier_id > 0) {
+    sd_bus_message_open_container(signal, 'e', "sv");
+    sd_bus_message_append(signal, "s", "barrier_id");
+    sd_bus_message_open_container(signal, 'v', "u");
+    sd_bus_message_append(signal, "u", barrier_id);
+    sd_bus_message_close_container(signal);
+    sd_bus_message_close_container(signal);
+  }
+  
+  r = sd_bus_message_close_container(signal);
+  if (r < 0) goto cleanup;
+
+  r = sd_bus_send(bus, signal, NULL);
+  if (r < 0) {
+    logprint(ERROR, "Failed to send Activated signal: %s", strerror(-r));
+  }
+cleanup:
+  sd_bus_message_unref(signal);
+  return r;
 }
 
-static int dbus_signal_Deactivated(sd_bus *bus, const char *session_handle)
+static int dbus_signal_Deactivated(sd_bus *bus, struct SessionContext *context, double cursor_x, double cursor_y)
 {
-  logprint(DEBUG, "Emitting Deactivated signal");
-  return dbus_helper_emit_signal(bus, "Deactivated", session_handle);
+  int r;
+  sd_bus_message *signal = NULL;
+  
+  logprint(DEBUG, "Emitting Deactivated signal for session %s (last ID: %u)", context->session_handle, context->activation_id);
+
+  r = sd_bus_message_new_signal(bus, &signal, OBJECT_PATH_NAME, INPUTCAPTURE_INTERFACE_NAME, "Deactivated");
+  if (r < 0) {
+    logprint(ERROR, "Failed to create Deactivated signal: %s", strerror(-r));
+    return r;
+  }
+
+  r = sd_bus_message_append(signal, "o", context->session_handle);
+  if (r < 0) goto cleanup;
+
+  r = sd_bus_message_open_container(signal, 'a', "{sv}");
+  if (r < 0) goto cleanup;
+
+  sd_bus_message_open_container(signal, 'e', "sv");
+  sd_bus_message_append(signal, "s", "activation_id");
+  sd_bus_message_open_container(signal, 'v', "u");
+  sd_bus_message_append(signal, "u", context->activation_id);
+  sd_bus_message_close_container(signal);
+  sd_bus_message_close_container(signal);
+
+  sd_bus_message_open_container(signal, 'e', "sv");
+  sd_bus_message_append(signal, "s", "cursor_position");
+
+  sd_bus_message_open_container(signal, 'v', "(dd)");
+  sd_bus_message_open_container(signal, 'r', "dd");
+  sd_bus_message_append(signal, "d", cursor_x);
+  sd_bus_message_append(signal, "d", cursor_y);
+  sd_bus_message_close_container(signal);
+  sd_bus_message_close_container(signal);
+  sd_bus_message_close_container(signal);
+
+  r = sd_bus_message_close_container(signal);
+  if (r < 0) goto cleanup;
+
+  r = sd_bus_send(bus, signal, NULL);
+  if (r < 0) {
+    logprint(ERROR, "Failed to send Deactivated signal: %s", strerror(-r));
+  }
+
+cleanup:
+  sd_bus_message_unref(signal);
+  return r;
 }
 
 static int dbus_signal_ZonesChanged(sd_bus *bus, const char *session_handle)
 {
-  logprint(DEBUG, "Emitting ZonesChanged signal");
-  return dbus_helper_emit_signal(bus, "ZonesChanged", session_handle);
+  int r;
+  sd_bus_message *signal = NULL;
+
+  logprint(DEBUG, "Emitting ZonesChanged signal for session %s", session_handle);
+
+  r = sd_bus_message_new_signal(bus, &signal, OBJECT_PATH_NAME, INPUTCAPTURE_INTERFACE_NAME, "ZonesChanged");
+  if (r < 0) {
+    logprint(ERROR, "Failed to create ZonesChanged signal: %s", strerror(-r));
+    return r;
+  }
+
+  r = sd_bus_message_append(signal, "o", session_handle);
+  if (r < 0) goto cleanup;
+
+  r = sd_bus_message_open_container(signal, 'a', "{sv}");
+  if (r < 0) goto cleanup;
+  r = sd_bus_message_close_container(signal);
+  if (r < 0) goto cleanup;
+
+  r = sd_bus_send(bus, signal, NULL);
+  if (r < 0) {
+    logprint(ERROR, "Failed to send ZonesChanged signal: %s", strerror(-r));
+  }
+cleanup:
+  sd_bus_message_unref(signal);
+  return r;
 }
 
 static struct SessionContext* eis_helper_find_session(const char *session_path) {
@@ -1239,53 +1354,6 @@ static void eis_helper_handle_event(struct eis_event *event) {
   }
 }
 
-// static int eis_helper_dispatch_handler(sd_event_source *s, int fd, uint32_t revents, void *userdata) {
-//   (void)s; (void)fd; (void)revents;
-//   struct eis *eis = (struct eis*)userdata;
-
-//   // dispatch all pending libeis events
-//   eis_dispatch(eis);
-
-//   // process all events in the queue
-//   struct eis_event *event;
-//   while ((event = eis_get_event(eis))) {
-//     eis_helper_handle_event(event);
-//     eis_event_unref(event);
-//   }
-
-//   return 0;
-// }
-
-// static int wayland_dispatch_handler(sd_event_source *s, int fd, uint32_t revents, void *userdata) {
-//   struct InputCaptureData *data = (struct InputCaptureData *)userdata;
-
-//   if (revents & (EPOLLERR | EPOLLHUP)) {
-//     logprint(ERROR, "Wayland connection error. Shutting down\n");
-//     sd_event_exit(data->event_loop, -EIO);
-//     return 0;
-//   }
-
-//   if (revents & EPOLLIN) {
-//     int r = wl_display_dispatch(data->wl_display);
-//     if (r < 0) {
-//       logprint(ERROR, "Wayland dispatch error. Shutting down\n");
-//       sd_event_exit(data->event_loop, -EIO);
-//       return 0;
-//     }
-//   }
-
-//   // try to flush any pending requests
-//   if (wl_display_flush(data->wl_display) < 0) {
-//     if (errno != EAGAIN) {  // EAGAIN is file, just means buffer is full
-//       logprint(ERROR, "Wayland flush error. Shutting down\n");
-//       sd_event_exit(data->event_loop, -EIO);
-//       return 0;
-//     }
-//   }
-
-//   return 0;
-// }
-
 static void wayland_registry_global(void *data, struct wl_registry *registry,
                                     uint32_t name, const char *interface, uint32_t version) {
   struct InputCaptureData *d = (struct InputCaptureData *)data;
@@ -1345,13 +1413,15 @@ static void wayland_handle_seat_name(void *data, struct wl_seat *seat, const cha
 static void wayland_handle_inhibitor_active(void *data, struct zwp_keyboard_shortcuts_inhibitor_v1 *inhibitor) {
   struct SessionContext *context = (struct SessionContext *)data;
   logprint(DEBUG, "Wayland: Keyboard inhibitor ACTIVE");
-  dbus_signal_Activated(interface_data.bus, context->session_handle);
+  (void)context;
+  // dbus_signal_Activated(interface_data.bus, context->session_handle);
 }
 
 static void wayland_handle_inhibitor_inactive(void *data, struct zwp_keyboard_shortcuts_inhibitor_v1 *inhibitor) {
   struct SessionContext *context = (struct SessionContext *)data;
   logprint(DEBUG, "Wayland: keyboard inhibitor INACTIVE");
-  dbus_signal_Deactivated(interface_data.bus, context->session_handle);
+  (void)context;
+  // dbus_signal_Deactivated(interface_data.bus, context->session_handle);
 }
 
 static void wayland_handle_layer_surface_configure(void *data, struct zwlr_layer_surface_v1 *surface, uint32_t serial, uint32_t w, uint32_t h) {
@@ -1367,7 +1437,7 @@ static void wayland_handle_layer_surface_closed(void *data, struct zwlr_layer_su
   cleanup_session_wayland(state);
   state->enabled = false;
   interface_data.active_session = NULL;
-  dbus_signal_Deactivated(interface_data.bus, state->session_handle);
+  // dbus_signal_Deactivated(interface_data.bus, state->session_handle);
 }
 
 static void wayland_handle_pointer_enter(void *data, struct wl_pointer *ptr, uint32_t serial,
@@ -1522,6 +1592,13 @@ static void wayland_handle_keyboard_repeat(void *data, struct wl_keyboard *kbd, 
   // wayland handles repeats by sending multiple .key events
 }
 
+static void wayland_handle_locked_pointer_locked(void *data, struct zwp_locked_pointer_v1 *locked_pointer) {
+  logprint(DEBUG, "Wayland: Pointer locked");
+}
+static void wayland_handle_locked_pointer_unlocked(void *data, struct zwp_locked_pointer_v1 *locked_pointer) {
+  logprint(DEBUG, "Wayland: Pointer unlocked");
+}
+
 static void output_handle_geometry(void *data, struct wl_output *wl_output, int32_t x, int32_t y, int32_t phys_w, int32_t phys_h, int32_t subpixel, const char *make, const char *model, int32_t transform) {
   struct Output *output = (struct Output *)data;
   output->x = x;
@@ -1546,7 +1623,8 @@ static void output_handle_done(void *data, struct wl_output *wl_output) {
     if (iter->enabled) {
       // invalidate the clients current zone_set_id and notify them
       // the spec says to increment by a "sensible amount"
-      iter->zone_set_id += 1;
+      if (iter->zone_set_id == 0) iter->zone_set_id = 1;
+      else iter->zone_set_id++;
       dbus_signal_ZonesChanged(output->data->bus, iter->session_handle);
     }
     iter = iter->next;
@@ -1600,31 +1678,13 @@ int xdpw_input_capture_init(struct xdpw_state *state) {
     goto cleanup_wayland;
   }
 
-  // generate socket_path for eis
-  const char *xdg_runtime_dir = getenv("XDG_RUNTIME_DIR");
-  if (!xdg_runtime_dir) {
-    logprint(ERROR, "XDG_RUNTIME_DIR environment variable is not set. Cannot create socket");
-    r = -ENXIO;
-    goto cleanup_eis;
-  }
-
-  int size_needed = snprintf(NULL, 0, "%s/eis-0", xdg_runtime_dir);
-  char *socket_path = (char *)malloc(size_needed + 1);
-  if (size_needed < 0 || !socket_path) {
-    logprint(ERROR, "Failed to allocate socket path");
-    r = -ENOMEM;
-    goto cleanup_eis;
-  }
-  snprintf(socket_path, size_needed + 1, "%s/eis-0", xdg_runtime_dir);
-
-  r = eis_setup_backend_socket(eis_context, socket_path);
+  r = eis_setup_backend_fd(eis_context);
   if (r < 0) {
-    logprint(ERROR, "Failed to create EIS socket: %s", strerror(-r));
-    free(socket_path);
+    logprint(ERROR, "Failed to setup EIS FD backend", strerror(-r));
     goto cleanup_eis;
   }
-  logprint(INFO, "Eis server listening at: %s", socket_path);
-  free(socket_path);
+
+  logprint(INFO, "Eis server listening");
 
   int eis_fd = eis_get_fd(eis_context);
   if (eis_fd < 0) {
