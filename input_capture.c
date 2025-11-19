@@ -1286,66 +1286,60 @@ static struct SessionContext* eis_helper_find_session(const char *session_path) 
 }
 
 static void eis_helper_handle_event(struct eis_event *event) {
-  struct eis_client *client;
-  struct eis_seat *seat;
-  struct SessionContext *context;
-
   logprint(DEBUG, "EIS Event: %s", eis_event_type_to_string(eis_event_get_type(event)));
 
   switch (eis_event_get_type(event)) {
     case EIS_EVENT_CLIENT_CONNECT: {
-      client = eis_event_get_client(event);
+      struct eis_client *client = eis_event_get_client(event);
       logprint(DEBUG, "New EIS client connected");
       eis_client_connect(client);
       break;
     }
     case EIS_EVENT_CLIENT_DISCONNECT: {
-      client = eis_event_get_client(event);
-      context = (struct SessionContext *)eis_client_get_user_data(client);
+      struct eis_client *client = eis_event_get_client(event);
+      struct SessionContext *context = (struct SessionContext *)eis_client_get_user_data(client);
       if (context) {
+        context->device = NULL;
         logprint(DEBUG, "EIS client disconnected (session_path: %s)", context->session_handle);
-        eis_client_set_user_data(client, NULL);
-      }
-      else {
-        logprint(DEBUG, "EIS client disconnected (no session_path)");
       }
       break;
     }
     case EIS_EVENT_SEAT_BIND: {
-      seat = eis_event_get_seat(event);
-      client = eis_seat_get_client(seat);
+      struct eis_seat *seat = eis_event_get_seat(event);
+      struct eis_client *client = eis_seat_get_client(seat);
 
       const char *seat_name = eis_seat_get_name(seat);
       logprint(DEBUG, "EIS client bound seat: %s", seat_name);
 
-      context = eis_helper_find_session(seat_name);
+      struct SessionContext *context = eis_helper_find_session(seat_name);
       if (!context) {
         logprint(ERROR, "EIS Error: unknown session_path used as seat name: %s", seat_name);
         eis_client_disconnect(client);
-      }
-      else {
-        logprint(DEBUG, "Linking EIS client to session %s", context->session_handle);
-        eis_client_set_user_data(client, context);
-
-        if (context->capabilities & 1) eis_seat_configure_capability(seat, EIS_DEVICE_CAP_KEYBOARD);
-        if (context->capabilities & 2) eis_seat_configure_capability(seat, EIS_DEVICE_CAP_POINTER);
-        if (context->capabilities & 4) eis_seat_configure_capability(seat, EIS_DEVICE_CAP_TOUCH);
-        eis_seat_add(seat);
-
-        logprint(DEBUG, "Creating new virtual device for session %s", context->session_handle);
-        struct eis_device *device = eis_seat_new_device(seat);
-        context->device = device;
-
-        eis_device_configure_name(device, "Portal Virtual Input");
-        eis_device_configure_type(device, EIS_DEVICE_TYPE_VIRTUAL);
-        
-        if (context->capabilities & 1) eis_device_configure_capability(device, EIS_DEVICE_CAP_KEYBOARD);
-        if (context->capabilities & 2) eis_device_configure_capability(device, EIS_DEVICE_CAP_POINTER);
-        if (context->capabilities & 4) eis_device_configure_capability(device, EIS_DEVICE_CAP_TOUCH);
-
-        eis_device_add(device);
+        return;
       }
 
+      logprint(DEBUG, "Linking EIS client to session %s", context->session_handle);
+      eis_client_set_user_data(client, context);
+
+      if (context->capabilities & 1) eis_seat_configure_capability(seat, EIS_DEVICE_CAP_KEYBOARD);
+      if (context->capabilities & 2) eis_seat_configure_capability(seat, EIS_DEVICE_CAP_POINTER);
+      if (context->capabilities & 4) eis_seat_configure_capability(seat, EIS_DEVICE_CAP_TOUCH);
+      eis_seat_add(seat);
+
+      logprint(DEBUG, "Creating new virtual device for session %s", context->session_handle);
+
+      struct eis_device *device = eis_seat_new_device(seat);
+      eis_device_configure_name(device, "Portal Virtual Input");
+      eis_device_configure_type(device, EIS_DEVICE_TYPE_VIRTUAL);
+      
+      if (context->capabilities & 1) eis_device_configure_capability(device, EIS_DEVICE_CAP_KEYBOARD);
+      if (context->capabilities & 2) eis_device_configure_capability(device, EIS_DEVICE_CAP_POINTER);
+      if (context->capabilities & 4) eis_device_configure_capability(device, EIS_DEVICE_CAP_TOUCH);
+      
+      eis_device_add(device);
+      eis_device_resume(device);
+
+      context->device = device;
       break;
     }
     default: 
