@@ -2,6 +2,7 @@
 
 #include "xdpw.h"
 #include "logger.h"
+#include "session.h"
 
 #include "wlr-layer-shell-unstable-v1-client-protocol.h"
 #include "pointer-constraints-unstable-v1-client-protocol.h"
@@ -16,19 +17,7 @@
 #include <sys/epoll.h>
 #include <sys/mman.h>
 
-#define SD_BUS_TYPE_ARRAY "a"
-#define SD_BUS_TYPE_DICT_ENTRY_BEGIN "{"
-#define SD_BUS_TYPE_DICT_ENTRY_END "}"
-#define SD_BUS_TYPE_STRING "s"
-#define SD_BUS_TYPE_VARIANT "v"
-#define SD_BUS_TYPE_OBJECT_PATH "o"
-#define SD_BUS_TYPE_UINT32 "u"
-#define SD_BUS_TYPE_UNIX_FD "h"
-
-#define VOID_RETURN ""
-
-static const char *INPUTCAPTURE_INTERFACE_NAME = "org.freedesktop.portal.InputCapture";
-static const char *REQUEST_INTERFACE_NAME = "org.freedesktop.impl.portal.Request";
+static const char *INPUTCAPTURE_INTERFACE_NAME = "org.freedesktop.impl.portal.InputCapture";
 static const char *SESSION_INTERFACE_NAME = "org.freedesktop.impl.portal.Session";
 static const char *OBJECT_PATH_NAME = "/org/freedesktop/portal/desktop";
 
@@ -61,18 +50,16 @@ static int dbus_method_Enable(sd_bus_message *, void *, sd_bus_error *);
 static int dbus_method_Disable(sd_bus_message *, void *, sd_bus_error *);
 static int dbus_method_Release(sd_bus_message *, void *, sd_bus_error *);
 static int dbus_method_ConnectToEIS(sd_bus_message *, void *, sd_bus_error *);
-static int dbus_signal_Disabled(sd_bus *, const char *) __attribute__((unused));
+static int dbus_signal_Disabled(sd_bus *, const char *)  __attribute__((unused));
 static int dbus_signal_Activated(sd_bus *, const char *);
 static int dbus_signal_Deactivated(sd_bus *, const char *);
 static int dbus_signal_ZonesChanged(sd_bus *, const char *);
-static char *dbus_helper_get_sender(const char *);
 static int dbus_helper_drain_dict(sd_bus_message *);
-static int dbus_helper_parse_CreateSession_options(sd_bus_message *, const char **, const char **, uint32_t *);
-static int dbus_helper_generate_path(char **, const char *, const char *, const char *);
+static int dbus_helper_parse_CreateSession_options(sd_bus_message *, uint32_t *);
 static int dbus_helper_emit_signal(sd_bus *, const char *, const char *);
 static struct SessionContext* eis_helper_find_session(const char *);
 static void eis_helper_handle_event(struct eis_event *);
-static int dbus_method_Close(sd_bus_message *, void *, sd_bus_error *);
+// static int dbus_method_Close(sd_bus_message *, void *, sd_bus_error *) __attribute__((unused));
 static void wayland_registry_global(void *, struct wl_registry *, uint32_t, const char *, uint32_t);
 static void wayland_registry_global_remove(void *, struct wl_registry *, uint32_t);
 static void cleanup_session_wayland(struct SessionContext *);
@@ -86,27 +73,27 @@ static void output_handle_scale(void *, struct wl_output *, int32_t);
 /* --- dbus vtable --- */
 static const sd_bus_vtable input_capture_vtable[] = {
   SD_BUS_VTABLE_START(0),
-  SD_BUS_PROPERTY("SupportedCapabilities", SD_BUS_TYPE_UINT32, dbus_property_SupportedCapabilities, offsetof(struct InputCaptureData, capabilities), SD_BUS_VTABLE_PROPERTY_CONST),
-  SD_BUS_PROPERTY("version", SD_BUS_TYPE_UINT32, dbus_property_version, offsetof(struct InputCaptureData, version), SD_BUS_VTABLE_PROPERTY_CONST),
-  SD_BUS_METHOD("CreateSession", SD_BUS_TYPE_STRING SD_BUS_TYPE_ARRAY SD_BUS_TYPE_DICT_ENTRY_BEGIN SD_BUS_TYPE_STRING SD_BUS_TYPE_VARIANT SD_BUS_TYPE_DICT_ENTRY_END, SD_BUS_TYPE_OBJECT_PATH, dbus_method_CreateSession, SD_BUS_VTABLE_UNPRIVILEGED),
-  SD_BUS_METHOD("GetZones", SD_BUS_TYPE_OBJECT_PATH SD_BUS_TYPE_ARRAY SD_BUS_TYPE_DICT_ENTRY_BEGIN SD_BUS_TYPE_STRING SD_BUS_TYPE_VARIANT SD_BUS_TYPE_DICT_ENTRY_END, SD_BUS_TYPE_OBJECT_PATH, dbus_method_GetZones, SD_BUS_VTABLE_UNPRIVILEGED),
-  SD_BUS_METHOD("SetPointerBarriers", SD_BUS_TYPE_OBJECT_PATH SD_BUS_TYPE_ARRAY SD_BUS_TYPE_DICT_ENTRY_BEGIN SD_BUS_TYPE_STRING SD_BUS_TYPE_VARIANT SD_BUS_TYPE_DICT_ENTRY_END SD_BUS_TYPE_ARRAY SD_BUS_TYPE_ARRAY SD_BUS_TYPE_DICT_ENTRY_BEGIN SD_BUS_TYPE_STRING SD_BUS_TYPE_VARIANT SD_BUS_TYPE_DICT_ENTRY_END SD_BUS_TYPE_UINT32, SD_BUS_TYPE_OBJECT_PATH, dbus_method_SetPointerBarriers, SD_BUS_VTABLE_UNPRIVILEGED),
-  SD_BUS_METHOD("Enable", SD_BUS_TYPE_OBJECT_PATH SD_BUS_TYPE_ARRAY SD_BUS_TYPE_DICT_ENTRY_BEGIN SD_BUS_TYPE_STRING SD_BUS_TYPE_VARIANT SD_BUS_TYPE_DICT_ENTRY_END, VOID_RETURN, dbus_method_Enable, SD_BUS_VTABLE_UNPRIVILEGED),
-  SD_BUS_METHOD("Disable", SD_BUS_TYPE_OBJECT_PATH SD_BUS_TYPE_ARRAY SD_BUS_TYPE_DICT_ENTRY_BEGIN SD_BUS_TYPE_STRING SD_BUS_TYPE_VARIANT SD_BUS_TYPE_DICT_ENTRY_END, VOID_RETURN, dbus_method_Disable, SD_BUS_VTABLE_UNPRIVILEGED),
-  SD_BUS_METHOD("Release", SD_BUS_TYPE_OBJECT_PATH SD_BUS_TYPE_ARRAY SD_BUS_TYPE_DICT_ENTRY_BEGIN SD_BUS_TYPE_STRING SD_BUS_TYPE_VARIANT SD_BUS_TYPE_DICT_ENTRY_END, VOID_RETURN, dbus_method_Release, SD_BUS_VTABLE_UNPRIVILEGED),
-  SD_BUS_METHOD("ConnectToEIS", SD_BUS_TYPE_OBJECT_PATH SD_BUS_TYPE_ARRAY SD_BUS_TYPE_DICT_ENTRY_BEGIN SD_BUS_TYPE_STRING SD_BUS_TYPE_VARIANT SD_BUS_TYPE_DICT_ENTRY_END, SD_BUS_TYPE_UNIX_FD, dbus_method_ConnectToEIS, SD_BUS_VTABLE_UNPRIVILEGED),
-  SD_BUS_SIGNAL("Disabled", SD_BUS_TYPE_OBJECT_PATH SD_BUS_TYPE_ARRAY SD_BUS_TYPE_DICT_ENTRY_BEGIN SD_BUS_TYPE_STRING SD_BUS_TYPE_VARIANT SD_BUS_TYPE_DICT_ENTRY_END, 0),
-  SD_BUS_SIGNAL("Activated", SD_BUS_TYPE_OBJECT_PATH SD_BUS_TYPE_ARRAY SD_BUS_TYPE_DICT_ENTRY_BEGIN SD_BUS_TYPE_STRING SD_BUS_TYPE_VARIANT SD_BUS_TYPE_DICT_ENTRY_END, 0),
-  SD_BUS_SIGNAL("Deactivated", SD_BUS_TYPE_OBJECT_PATH SD_BUS_TYPE_ARRAY SD_BUS_TYPE_DICT_ENTRY_BEGIN SD_BUS_TYPE_STRING SD_BUS_TYPE_VARIANT SD_BUS_TYPE_DICT_ENTRY_END, 0),
-  SD_BUS_SIGNAL("ZonesChanged", SD_BUS_TYPE_OBJECT_PATH SD_BUS_TYPE_ARRAY SD_BUS_TYPE_DICT_ENTRY_BEGIN SD_BUS_TYPE_STRING SD_BUS_TYPE_VARIANT SD_BUS_TYPE_DICT_ENTRY_END, 0),
+  SD_BUS_PROPERTY("SupportedCapabilities", "u", dbus_property_SupportedCapabilities, offsetof(struct InputCaptureData, capabilities), SD_BUS_VTABLE_PROPERTY_CONST),
+  SD_BUS_PROPERTY("version", "u", dbus_property_version, offsetof(struct InputCaptureData, version), SD_BUS_VTABLE_PROPERTY_CONST),
+  SD_BUS_METHOD("CreateSession", "oossa{sv}", "ua{sv}", dbus_method_CreateSession, SD_BUS_VTABLE_UNPRIVILEGED),
+  SD_BUS_METHOD("GetZones", "oosa{sv}", "ua{sv}", dbus_method_GetZones, SD_BUS_VTABLE_UNPRIVILEGED),
+  SD_BUS_METHOD("SetPointerBarriers", "oosa{sv}aa{sv}u", "ua{sv}", dbus_method_SetPointerBarriers, SD_BUS_VTABLE_UNPRIVILEGED),
+  SD_BUS_METHOD("Enable", "osa{sv}", "ua{sv}", dbus_method_Enable, SD_BUS_VTABLE_UNPRIVILEGED),
+  SD_BUS_METHOD("Disable", "osa{sv}", "ua{sv}", dbus_method_Disable, SD_BUS_VTABLE_UNPRIVILEGED),
+  SD_BUS_METHOD("Release", "osa{sv}", "ua{sv}", dbus_method_Release, SD_BUS_VTABLE_UNPRIVILEGED),
+  SD_BUS_METHOD("ConnectToEIS", "osa{sv}", "h", dbus_method_ConnectToEIS, SD_BUS_VTABLE_UNPRIVILEGED),
+  SD_BUS_SIGNAL("Disabled", "oa{sv}", 0),
+  SD_BUS_SIGNAL("Activated", "oa{sv}", 0),
+  SD_BUS_SIGNAL("Deactivated", "oa{sv}", 0),
+  SD_BUS_SIGNAL("ZonesChanged", "oa{sv}", 0),
   SD_BUS_VTABLE_END,
 };
 
-static const sd_bus_vtable session_vtable[] = {
-  SD_BUS_VTABLE_START(0),
-  SD_BUS_METHOD("Close", "", "", dbus_method_Close, SD_BUS_VTABLE_UNPRIVILEGED),
-  SD_BUS_VTABLE_END,
-};
+// static const sd_bus_vtable session_vtable[] = {
+//   SD_BUS_VTABLE_START(0),
+//   SD_BUS_METHOD("Close", "", "", dbus_method_Close, SD_BUS_VTABLE_UNPRIVILEGED),
+//   SD_BUS_VTABLE_END,
+// };
 
 /* --- Wayland listeners --- */
 static void wayland_handle_layer_surface_configure(void *, struct zwlr_layer_surface_v1 *, uint32_t, uint32_t, uint32_t);
@@ -192,55 +179,70 @@ static void free_barrier_list(struct Barrier *list) {
 
 static void sc_free(struct SessionContext *sc) {
   if (!sc) return;
-  if (sc->session_path) free(sc->session_path);
+  if (sc->handle) free(sc->handle);
+  if (sc->session_handle) free(sc->session_handle);
+  if (sc->app_id) free(sc->app_id);
   if (sc->parent_window) free(sc->parent_window);
-  if (sc->handle_token) free(sc->handle_token);
-  if (sc->session_handle_token) free(sc->session_handle_token);
+  if (sc->session_id) free(sc->session_id);
   free_barrier_list(sc->barriers);
   free(sc);
 }
 
-static struct SessionContext *sc_create(const char *session_path, const char *parent_window, const char *handle_token, const char *session_handle_token, uint32_t capabilities) {
+static struct SessionContext *sc_create(const char *handle, const char *session_handle, const char *app_id, const char *parent_window, uint32_t capabilities) {
+  static uint32_t session_counter = 0;
+  
   struct SessionContext *context = (struct SessionContext*)calloc(1, sizeof(struct SessionContext));
   if (!context) return NULL;
   
-  context->session_path = strdup(session_path);
+  context->handle = strdup(handle);
+  context->session_handle = strdup(session_handle);
+  context->app_id = strdup(app_id);
   context->parent_window = strdup(parent_window);
-  context->handle_token = strdup(handle_token);
-  context->session_handle_token = strdup(session_handle_token);
   context->capabilities = capabilities;
-
-  if (!context->session_path ||!context->parent_window || !context->handle_token || !context->session_handle_token) {
+  
+  if (!context->handle ||!context->session_handle || !context->app_id || !context->parent_window) {
     sc_free(context);
     return NULL;
   }
+  
+  // generate a unique session_id string
+  // this is used by the client to identify the session in future calls
+  // we use a static counter combined with a random number for uniqueness
+  int size_needed = snprintf(NULL, 0, "%u_%u", getpid(), ++session_counter);
+  context->session_id = (char *)malloc(size_needed + 1);
+  if (!context->session_id) {
+    sc_free(context);
+    return NULL;
+  }
+  snprintf(context->session_id, size_needed + 1, "%u_%u", getpid(), session_counter);
+
   return context;
 }
 
-static int dbus_method_Close(sd_bus_message *m, void *userdata, sd_bus_error *ret_error) {
-  (void)ret_error;
-  struct SessionContext *context = (struct SessionContext *)userdata;
-  logprint(DEBUG, "Closing session (handle: %s)", context->handle_token ? context->handle_token : "UNDEFINED");
+// static int dbus_method_Close(sd_bus_message *m, void *userdata, sd_bus_error *ret_error) {
+//   (void)ret_error;
+//   struct SessionContext *context = (struct SessionContext *)userdata;
+//   logprint(DEBUG, "Closing session (handle: %s)", context->handle_token ? context->handle_token : "UNDEFINED");
 
-  struct SessionContext **p = &interface_data.session_list_head;
-  while (*p) {
-    if (*p == context) {
-      *p = context->next;
-      break;
-    }
-    p = &(*p)->next;
-  }
+//   struct SessionContext **p = &interface_data.session_list_head;
+//   while (*p) {
+//     if (*p == context) {
+//       *p = context->next;
+//       break;
+//     }
+//     p = &(*p)->next;
+//   }
 
-  if (context->enabled) {
-    cleanup_session_wayland(context);
-    interface_data.active_session = NULL;
-  }
+//   if (context->enabled) {
+//     cleanup_session_wayland(context);
+//     interface_data.active_session = NULL;
+//   }
 
-  sd_bus_slot_unref(context->slot); 
-  sc_free(context);
+//   sd_bus_slot_unref(context->slot); 
+//   sc_free(context);
 
-  return sd_bus_reply_method_return(m, NULL);
-}
+//   return sd_bus_reply_method_return(m, NULL);
+// }
 
 /*--------------------------------------------- Properties ------------------------------------------------------------*/
 static int dbus_property_SupportedCapabilities(sd_bus *bus, const char *path, const char *interface, 
@@ -252,7 +254,7 @@ static int dbus_property_SupportedCapabilities(sd_bus *bus, const char *path, co
   (void)member;
   (void)userdata;
   (void)ret_error;
-  return sd_bus_message_append(reply, SD_BUS_TYPE_UINT32, interface_data.capabilities);
+  return sd_bus_message_append(reply, "u", interface_data.capabilities);
 }
 
 static int dbus_property_version(sd_bus *bus, const char *path, const char *interface, 
@@ -264,7 +266,7 @@ static int dbus_property_version(sd_bus *bus, const char *path, const char *inte
   (void)member;
   (void)userdata;
   (void)ret_error;
-  return sd_bus_message_append(reply, SD_BUS_TYPE_UINT32, interface_data.version);
+  return sd_bus_message_append(reply, "u", interface_data.version);
 }
 
 static int dbus_helper_drain_dict(sd_bus_message *m) {
@@ -284,7 +286,7 @@ static int dbus_helper_drain_dict(sd_bus_message *m) {
   return sd_bus_message_exit_container(m);
 }
 
-static int dbus_helper_parse_CreateSession_options(sd_bus_message *m, const char **handle_token, const char **session_handle_token, uint32_t *capabilities) {
+static int dbus_helper_parse_CreateSession_options(sd_bus_message *m, uint32_t *capabilities) {
   int r;
 
   r = sd_bus_message_enter_container(m, 'a', "{sv}");
@@ -308,21 +310,7 @@ static int dbus_helper_parse_CreateSession_options(sd_bus_message *m, const char
       return r;
     }
 
-    if (strcmp(key, "handle_token") == 0) {
-      r = sd_bus_message_read(m, "v", "s", handle_token);
-      if (r < 0) {
-        logprint(ERROR, "Failed to read handle_token's value: %s", strerror(-r));
-        return r;
-      }
-    } 
-    else if (strcmp(key, "session_handle_token") == 0) {
-      r = sd_bus_message_read(m, "v", "s", session_handle_token);
-      if (r < 0) {
-        logprint(ERROR, "Failed to read session_handle_token's value: %s", strerror(-r));
-        return r;
-      }
-    }
-    else if (strcmp(key, "capabilities") == 0) {
+    if (strcmp(key, "capabilities") == 0) {
       r = sd_bus_message_read(m, "v", "u", capabilities);
       if (r < 0) {
         logprint(ERROR, "Failed to read capabilities's value: %s", strerror(-r));
@@ -354,79 +342,57 @@ static int dbus_helper_parse_CreateSession_options(sd_bus_message *m, const char
   return 0;
 }
 
-static char *dbus_helper_get_sender(const char *str) {
-  size_t len = strlen(str);
-  char *out = (char *)malloc(len + 1);
-  if (!out) return NULL;
-
-  size_t j = 0;
-  for (size_t i = 0; i < len; i++) {
-      if (str[i] == ':') {
-          continue;
-      } else if (str[i] == '.') {
-          out[j++] = '_';
-      } else {
-          out[j++] = str[i];
-      }
-  }
-
-  out[j] = '\0';
-  return out;
-}
-
-static int dbus_helper_generate_path(char **path, const char *type, const char *sender, const char *token) {
-  int size_needed = snprintf(NULL, 0, "%s/%s/%s/%s", OBJECT_PATH_NAME, type, sender, token);
-
-  if (size_needed < 0) return -EINVAL;
-
-  *path = (char *)malloc(size_needed + 1);
-  if (!path) return -ENOMEM;
-
-  snprintf(*path, size_needed + 1, "%s/%s/%s/%s", OBJECT_PATH_NAME, type, sender, token);
-  return 0;
-}
-
 static int dbus_method_CreateSession(sd_bus_message *m, void *userdata, sd_bus_error *ret_error) {
   (void)userdata;
-  (void)ret_error;
-
   int r;
-  const char *parent_window = NULL;
-  const char *handle_token = NULL;
-  const char *session_handle_token = NULL;
+  // IN variables
+  const char *handle = NULL;          // object path for request object
+  const char *session_handle = NULL;  // object path for session object
+  const char *app_id = NULL;          // app id of the caller
+  const char *parent_window = NULL;   // window id
+  
+  // options vardict variables
   uint32_t capabilities = 0;
-
-  char *session_path = NULL;
-  char *request_path = NULL;
-  char *sender = NULL;
+  
   struct SessionContext *context = NULL;
+  struct xdpw_request *request = NULL;
+  sd_bus_message *reply = NULL;
 
-  r = sd_bus_message_read(m, SD_BUS_TYPE_STRING, &parent_window);
+  // parse IN arguments
+  r = sd_bus_message_read(m, "ooss", &handle, &session_handle, &app_id, &parent_window);
+  if (r < 0) {
+    logprint(ERROR, "Failed to parse arguments: %s", strerror(-r));
+    return r;
+  }
+
+  r = dbus_helper_parse_CreateSession_options(m, &capabilities);
   if (r < 0) return r;
 
-  r = dbus_helper_parse_CreateSession_options(m, &handle_token, &session_handle_token, &capabilities);
-  if (r < 0) return r;
+  // validate capabilities 
+  capabilities &= interface_data.capabilities;
+  if (capabilities == 0) {
+    sd_bus_error_setf(ret_error, "org.freedesktop.portal.Error.NotSupported", "Requested capabilities (%u) not supported by this portal", capabilities);
+    return -EOPNOTSUPP;
+  }
 
-  if ((capabilities & ~interface_data.capabilities) != 0 || capabilities == 0) return -EINVAL;
+  // create async request object
+  request = xdpw_request_create(sd_bus_message_get_bus(m), handle);
+  if (!request) return -ENOMEM;
 
-  // 2. generate session objects
+  // perform logic here
+  // TODO
 
-  sender = dbus_helper_get_sender(sd_bus_message_get_sender(m));
-  if (!sender) return -ENOMEM;
-
-  r = dbus_helper_generate_path(&session_path, "session", sender, session_handle_token);
-  if (r < 0) goto cleanup_paths;
-
-  r = dbus_helper_generate_path(&request_path, "request", sender, handle_token);
-  if (r < 0) goto cleanup_paths;
-
-  context = sc_create(session_path, parent_window, handle_token, session_handle_token, capabilities);
-  if (!context) { r = -ENOMEM; goto cleanup_paths; }
+  // generate session context
+  context = sc_create(handle, session_handle, app_id, parent_window, capabilities);
+  if (!context) {
+    xdpw_request_destroy(request);
+    return -ENOMEM;
+  }
 
   r = sd_bus_add_object_vtable(
     sd_bus_message_get_bus(m),
     &context->slot,
-    context->session_path,
+    context->session_handle,
     SESSION_INTERFACE_NAME,
     session_vtable,
     context
@@ -434,137 +400,75 @@ static int dbus_method_CreateSession(sd_bus_message *m, void *userdata, sd_bus_e
   if (r < 0) {
     logprint(ERROR, "Error adding new object to session_vtable: %s", strerror(-r));
     sc_free(context);
-    goto cleanup_paths;
+    xdpw_request_destroy(request);
+    return r;
   }
 
+  // add context to global linked list
   context->next = interface_data.session_list_head;
   interface_data.session_list_head = context;
 
-  logprint(DEBUG, "CreateSession call: created new session: %s", context->session_path);
+  logprint(DEBUG, "CreateSession call: created new session: %s", context->session_id);
 
-  r = sd_bus_reply_method_return(m, SD_BUS_TYPE_OBJECT_PATH, request_path);
-  if (r < 0) {
-    sd_bus_slot_unref(context->slot);
-    sc_free(context);
-    goto cleanup_paths;
-  }
-  
-  sd_bus_message *reply;
-  sd_bus *bus = sd_bus_message_get_bus(m);
+  // construct the reply  
+  r = sd_bus_message_new_method_return(m , &reply);
+  if (r < 0) goto cleanup_request;
 
-  r = sd_bus_message_new_signal(bus, &reply, request_path, REQUEST_INTERFACE_NAME, "Response");
-  if (r < 0) goto response_finish;
-  
-  r = sd_bus_message_append(reply, SD_BUS_TYPE_UINT32, 0U);
-  if (r < 0) goto unref_reply;
+  // append response code
+  r = sd_bus_message_append(reply, "u", 0U);
+  if (r < 0) goto cleanup_reply;
 
+  // append results dictionary
   r = sd_bus_message_open_container(reply, 'a', "{sv}");
-  if (r < 0) goto unref_reply;
+  if (r < 0) goto cleanup_reply;
 
   r = sd_bus_message_open_container(reply, 'e', "sv");
-  if (r < 0) goto unref_reply;
-  r = sd_bus_message_append(reply, SD_BUS_TYPE_STRING, "session_handle");
-  if (r < 0) goto unref_reply;
-  r = sd_bus_message_append(reply, "v", SD_BUS_TYPE_OBJECT_PATH, context->session_path);
-  if (r < 0) goto unref_reply;
+  if (r < 0) goto cleanup_reply;
+  r = sd_bus_message_append(reply, "s", "session_id");
+  if (r < 0) goto cleanup_reply;
+  r = sd_bus_message_append(reply, "v", "s", context->session_id);
+  if (r < 0) goto cleanup_reply;
   r = sd_bus_message_close_container(reply);
+  if (r < 0) goto cleanup_reply;
 
   r = sd_bus_message_open_container(reply, 'e', "sv");
-  if (r < 0) goto unref_reply;
-  r = sd_bus_message_append(reply, SD_BUS_TYPE_STRING, "capabilities");
-  if (r < 0) goto unref_reply;
-  r = sd_bus_message_append(reply, "v", SD_BUS_TYPE_UINT32, context->capabilities);
-  if (r < 0) goto unref_reply;
+  if (r < 0) goto cleanup_reply;
+  r = sd_bus_message_append(reply, "s", "capabilities");
+  if (r < 0) goto cleanup_reply;
+  r = sd_bus_message_append(reply, "v", "u", context->capabilities);
+  if (r < 0) goto cleanup_reply;
   r = sd_bus_message_close_container(reply);
+  if (r < 0) goto cleanup_reply;
+  r = sd_bus_message_close_container(reply);
+  if (r < 0) goto cleanup_reply;
   
-  r = sd_bus_message_close_container(reply);
-
-  r = sd_bus_send(bus, reply, NULL);
+  r = sd_bus_send(sd_bus_message_get_bus(m), reply, NULL);
   if (r < 0) {
-    logprint(ERROR, "Error sending CreateSession Response signal: %s", strerror(-r));
+    logprint(ERROR, "Failed to send CreateSession reply: %s", strerror(-r));
   }
-  else logprint(DEBUG, "Sent Request::Response signal for CreateSession to handle: %s", request_path);
 
-unref_reply:
+cleanup_reply:
   sd_bus_message_unref(reply);
-response_finish:
-  free(sender);
-  free(session_path);
-  free(request_path);
+cleanup_request:
+  xdpw_request_destroy(request);
   return r;
-cleanup_paths:
-  if (sender) free(sender);
-  if (session_path) free(session_path);
-  if (request_path) free(request_path);
-  return r;
-}
-
-static int dbus_helper_parse_GetZones_options(sd_bus_message *m, const char **handle_token) {
-  int r;
-  r = sd_bus_message_enter_container(m, 'a', "{sv}");
-  if (r < 0) {
-    logprint(ERROR, "Error entering container: %s", strerror(-r));
-    return r;
-  }
-
-  while (sd_bus_message_at_end(m, 0) == 0) {
-    const char *key;
-    r = sd_bus_message_enter_container(m, 'e', "sv");
-    if (r < 0) {
-      logprint(ERROR, "Failed to enter dict entry: %s", strerror(-r));
-      return r;
-    }
-
-    r = sd_bus_message_read(m, "s", &key);
-    if (r < 0) {
-      logprint(ERROR, "Failed to read dict key: %s", strerror(-r));
-      return r;
-    }
-
-    if (strcmp(key, "handle_token") == 0) {
-      r = sd_bus_message_read(m, "v", "s", handle_token);
-      if (r < 0) {
-        logprint(ERROR, "Failed to read handle_token's value: %s", strerror(-r));
-        return r;
-      }
-    } 
-    else {
-      logprint(DEBUG, "Skipping unknown option: %s", key);
-      sd_bus_message_skip(m, "v");
-      if (r < 0) {
-        logprint(ERROR, "Failed to skip variant for key '%s': %s", key, strerror(-r));
-        return r;
-      }
-    }
-
-    r = sd_bus_message_exit_container(m);
-    if (r < 0) {
-      logprint(ERROR, "Failed to exit entry: %s", strerror(-r));
-      return r;
-    }
-  }
-
-  r = sd_bus_message_exit_container(m);
-  if (r < 0) {
-    logprint(ERROR, "Failed to exit container: %s", strerror(-r));
-    return r;
-  }
-
-  return 0;
 }
 
 static int dbus_method_GetZones(sd_bus_message *m, void *userdata, sd_bus_error *ret_error) {
   int r;
+  const char *handle = NULL;
   const char *session_handle = NULL;
-  const char *handle_token = NULL;
-  char *request_path = NULL;
-  char *sender = NULL;
+  const char *app_id = NULL;
+
   struct SessionContext *context = NULL;
-  sd_bus *bus = sd_bus_message_get_bus(m);
   sd_bus_message *reply = NULL;
 
-  r = sd_bus_message_read(m, SD_BUS_TYPE_OBJECT_PATH, &session_handle);
+  // get IN arguments
+  r = sd_bus_message_read(m, "oos", &handle, &session_handle, &app_id);
   if (r < 0) return r;
+
+  // skip optional IN options of type a{sv}
+  r = dbus_helper_drain_dict(m);
 
   context = eis_helper_find_session(session_handle);
   if (!context) {
@@ -572,55 +476,36 @@ static int dbus_method_GetZones(sd_bus_message *m, void *userdata, sd_bus_error 
     return -ENOENT;
   }
 
-  r = dbus_helper_parse_GetZones_options(m, &handle_token);
-  if (r < 0) {
-    sd_bus_error_setf(ret_error, SD_BUS_ERROR_INVALID_ARGS, "Failed to parse options: %s", strerror(-r));
-    return r;
-  }
-
-  sender = dbus_helper_get_sender(sd_bus_message_get_sender(m));
-  if (!sender) { r = -ENOMEM; goto cleanup; }
-
-  r = dbus_helper_generate_path(&request_path, "request", sender, handle_token);
-  if (r < 0) {
-    logprint(ERROR, "GetZones: failde to reply with request_path: %s", strerror(-r));
-    goto cleanup;
-  }
-
-  logprint(DEBUG, "GetZones: sending async response to %s", request_path);
-  r = sd_bus_reply_method_return(m, SD_BUS_TYPE_OBJECT_PATH, request_path);
-
-  context->zone_set_id += 1;
+  // update zone set version
   if (context->zone_set_id == 0) context->zone_set_id = 1;
+  else context->zone_set_id += 1;
 
-  r = sd_bus_message_new_signal(bus, &reply, request_path, REQUEST_INTERFACE_NAME, "Response");
-  if (r < 0) goto cleanup_signal;
+  logprint(DEBUG, "GetZones: Reporting zone_set %u for session %s", context->zone_set_id, session_handle);
+
+  r = sd_bus_message_new_method_return(m, &reply);
+  if (r < 0) goto cleanup;
   
-  r = sd_bus_message_append(reply, SD_BUS_TYPE_UINT32, 0U);
-  if (r < 0) goto cleanup_signal;
+  r = sd_bus_message_append(reply, "u", 0U);
+  if (r < 0) goto cleanup;
 
   r = sd_bus_message_open_container(reply, 'a', "{sv}");
-  if (r < 0) goto cleanup_signal;
-
+  if (r < 0) goto cleanup;
   r = sd_bus_message_open_container(reply, 'e', "sv");
-  if (r < 0) goto cleanup_signal;
-  r = sd_bus_message_append(reply, SD_BUS_TYPE_STRING, "zone_set");
-  if (r < 0) goto cleanup_signal;
-  r = sd_bus_message_append(reply, "v", SD_BUS_TYPE_UINT32, context->zone_set_id);
-  if (r < 0) goto cleanup_signal;
+  if (r < 0) goto cleanup;
+  r = sd_bus_message_append(reply, "s", "zone_set");
+  if (r < 0) goto cleanup;
+  r = sd_bus_message_append(reply, "v", "u", context->zone_set_id);
+  if (r < 0) goto cleanup;
   r = sd_bus_message_close_container(reply);
-  if (r < 0) goto cleanup_signal;
-
+  if (r < 0) goto cleanup;
   r = sd_bus_message_open_container(reply, 'e', "sv");
-  if (r < 0) goto cleanup_signal;
-  r = sd_bus_message_append(reply, SD_BUS_TYPE_STRING, "zones");
-  if (r < 0) goto cleanup_signal;
-  
+  if (r < 0) goto cleanup;
+  r = sd_bus_message_append(reply, "s", "zones");
+  if (r < 0) goto cleanup;
   r = sd_bus_message_open_container(reply, 'v', "a(uuii)");
-  if (r < 0) goto cleanup_signal;
-  
+  if (r < 0) goto cleanup;
   r = sd_bus_message_open_container(reply, 'a', "(uuii)");
-  if (r < 0) goto cleanup_signal;
+  if (r < 0) goto cleanup;
 
   struct Output *iter;
   wl_list_for_each(iter, &interface_data.output_list, link) {
@@ -635,33 +520,25 @@ static int dbus_method_GetZones(sd_bus_message *m, void *userdata, sd_bus_error 
       );
       if (r < 0) {
         logprint(ERROR, "GetZones: Failed to append zone: %s", strerror(-r));
-        goto cleanup_signal;
+        goto cleanup;
       }
     }
   }
 
   r = sd_bus_message_close_container(reply);
-  if (r < 0) goto cleanup_signal;
+  if (r < 0) goto cleanup;
   r = sd_bus_message_close_container(reply);
-  if (r < 0) goto cleanup_signal;
+  if (r < 0) goto cleanup;
   r = sd_bus_message_close_container(reply);
-  if (r < 0) goto cleanup_signal;
+  if (r < 0) goto cleanup;
 
   r = sd_bus_message_close_container(reply);
-  if (r < 0) goto cleanup_signal;
+  if (r < 0) goto cleanup;
 
-  r = sd_bus_send(bus, reply, NULL);
-  if (r < 0) {
-    logprint(ERROR, "GetZones: Error sending Response signal: %s", strerror(-r));
-  } else {
-    logprint(DEBUG, "GetZones: Sent Request::Response signal for handle: %s", request_path);
-  }
+  r = sd_bus_send(sd_bus_message_get_bus(m), reply, NULL);
 
-cleanup_signal:
-  sd_bus_message_unref(reply);
 cleanup:
-  if (sender) free(sender);
-  if (request_path) free(request_path);
+  sd_bus_message_unref(reply);
   return r;
 }
 
@@ -669,9 +546,6 @@ static int parse_and_store_barriers(sd_bus_message *m, struct SessionContext *co
   int r;
   struct Barrier *new_barriers_head = NULL;
   struct Barrier *failed_barriers_head = NULL;
-
-  free_barrier_list(context->barriers);
-  context->barriers = NULL;
 
   r = sd_bus_message_enter_container(m, 'a', "a{sv}");
   if (r < 0) return r;
@@ -705,68 +579,83 @@ static int parse_and_store_barriers(sd_bus_message *m, struct SessionContext *co
       }
       sd_bus_message_exit_container(m);
     }
-    if (r < 0) break; 
+    if (r < 0) goto cleanup_error;
 
     bool failed = false;
-    if (!id_found || barrier_id == 0 || !pos_found) {
-      failed = true;
-    }
-    if (x1 != x2 && y1 != y2) {
-      failed = true;
+    // must have id and position
+    if (!id_found || !pos_found) failed = true;
+    // id must be non zero
+    if (barrier_id == 0) failed = true;
+    // must be vertical or horizontal
+    if (x1 != x2 && y1 != y2) failed = true;
+    // must have length
+    if (x1 == x2 && y1 == y2) failed = true;
+
+    struct Barrier *node = (struct Barrier *)calloc(1, sizeof(struct Barrier));
+    if (!node) {
+      r = -ENOMEM;
+      goto cleanup_error;
     }
 
+    node->id = barrier_id;
+
     if (failed) {
-      struct Barrier *fail_node = (struct Barrier *)malloc(sizeof(struct Barrier));
-      fail_node->id = barrier_id;
-      fail_node->next = failed_barriers_head;
-      failed_barriers_head = fail_node;
+      // add to failed list
+      node->next = failed_barriers_head;
+      failed_barriers_head = node;
     } else {
-      struct Barrier *new_node = (struct Barrier *)malloc(sizeof(struct Barrier));
-      new_node->id = barrier_id;
-      new_node->x1 = x1; new_node->y1 = y1;
-      new_node->x2 = x2; new_node->y2 = y2;
-      new_node->next = new_barriers_head;
-      new_barriers_head = new_node;
+      node->x1 = x1; node->y1 = y1;
+      node->x2 = x2; node->y2 = y2;
+      node->next = new_barriers_head;
+      new_barriers_head = node;
       logprint(DEBUG, "  -> Stored valid barrier ID %u (%i, %i to %i, %i)", barrier_id, x1, y1, x2, y2);
     }
     sd_bus_message_exit_container(m);
   }
+  if (r < 0) goto cleanup_error;
+  r = sd_bus_message_exit_container(m);
+  if (r < 0) goto cleanup_error;
 
-  if (r < 0) {
-    free_barrier_list(new_barriers_head);
-    free_barrier_list(failed_barriers_head);
-    return r;
-  }
-
-  sd_bus_message_exit_container(m);
+  free_barrier_list(context->barriers);
   context->barriers = new_barriers_head;
+
   *out_failed_barriers_head = failed_barriers_head;
+
   return 0;
+
+cleanup_error:
+  free_barrier_list(new_barriers_head);
+  free_barrier_list(failed_barriers_head);
+  return r;
 }
 
 static int dbus_method_SetPointerBarriers(sd_bus_message *m, void *userdata, sd_bus_error *ret_error) {
-  const char *session_handle = NULL;
-  const char *handle_token = NULL;
-  uint32_t client_zone_set_id = 0;
-  char *request_path = NULL;
-  char *sender = NULL;
-  struct SessionContext *context = NULL;
-  sd_bus *bus = sd_bus_message_get_bus(m);
-  sd_bus_message *reply= NULL;
-  struct Barrier *failed_barriers_list = NULL;
   int r;
+  const char *handle = NULL;
+  const char *session_handle = NULL;
+  const char *app_id = NULL;
+  uint32_t zone_set = 0;
 
-  r = sd_bus_message_read(m, SD_BUS_TYPE_OBJECT_PATH, &session_handle);
-  if (r < 0) return r;
+  struct SessionContext *context = NULL;
+  struct Barrier *failed_barriers_list = NULL;
+  sd_bus_message *reply = NULL;
 
-  context = eis_helper_find_session(session_handle);
-  if (!context) {
-    sd_bus_error_setf(ret_error, "org.freedesktop.portal.Error.NotFound", "session_handle %s not found", session_handle);
-    return -ENOENT;
+  // parse IN arguments
+  r = sd_bus_message_read(m, "oos", &handle, &session_handle, &app_id);
+  if (r < 0) {
+    logprint(ERROR, "SetPointerBarriers: failed to read arguments: %s", strerror(-r));
+    return r;
   }
 
-  r = dbus_helper_parse_GetZones_options(m, &handle_token);
+  r = dbus_helper_drain_dict(m);
   if (r < 0) return r;
+
+  // validate session
+  context = eis_helper_find_session(session_handle);
+  if (!context) {
+    sd_bus_error_setf(ret_error, "org.freedesktop.portal.Error.NotFound", "Session not found: %s", session_handle);
+    return -ENOENT;
+  }
 
   r = parse_and_store_barriers(m, context, &failed_barriers_list);
   if (r < 0) {
@@ -774,100 +663,103 @@ static int dbus_method_SetPointerBarriers(sd_bus_message *m, void *userdata, sd_
     return r;
   }
 
-  r = sd_bus_message_read(m, SD_BUS_TYPE_UINT32, &client_zone_set_id);
-  if (r < 0) return r;
+  r = sd_bus_message_read(m, "u", &zone_set);
+  if (r < 0) {
+    free_barrier_list(failed_barriers_list);
+    return r;
+  }
 
-  if (client_zone_set_id != context->zone_set_id) {
-    logprint(WARN, "SetPointerbarriers: zone set id mismatch (client: %u, server: %u)", client_zone_set_id, context->zone_set_id);
-    sd_bus_error_setf(ret_error, "org.freedesktop.portal.Error.NotFound", "Zone set id mismatch (client: %u, server: %u)", client_zone_set_id, context->zone_set_id);
+  if (zone_set != context->zone_set_id) {
+    logprint(WARN, "SetPointerbarriers: zone set id mismatch (client: %u, server: %u)", zone_set, context->zone_set_id);
+    sd_bus_error_setf(ret_error, "org.freedesktop.portal.Error.NotFound", "Zone set id mismatch (client: %u, server: %u)", zone_set, context->zone_set_id);
+    
     free_barrier_list(context->barriers);
     context->barriers = NULL;
+
     free_barrier_list(failed_barriers_list);
     return -EINVAL;
   }
 
-  logprint(DEBUG, "SetPointerBarriers: Sucessfully set barriers for zone set %u", client_zone_set_id);
+  logprint(DEBUG, "SetPointerBarriers: successfully updated barriers for session %s", session_handle);
 
-  sender = dbus_helper_get_sender(sd_bus_message_get_sender(m));
-  if (!sender) { r = -ENOMEM; goto cleanup; }
-  r = dbus_helper_generate_path(&request_path, "request", sender, handle_token);
-  if (r < 0) goto cleanup;
-
-  r = sd_bus_reply_method_return(m, SD_BUS_TYPE_OBJECT_PATH, request_path);
+  // construct reply
+  // signature: ua{sv}
+  r = sd_bus_message_new_method_return(m, &reply);
   if (r < 0) {
-    goto cleanup;
+    free_barrier_list(failed_barriers_list);
+    return r;
   }
 
-  r = sd_bus_message_new_signal(bus, &reply, request_path, REQUEST_INTERFACE_NAME, "Response");
+  r = sd_bus_message_append(reply, "u", 0U);
   if (r < 0) goto cleanup;
-  r = sd_bus_message_append(reply, SD_BUS_TYPE_UINT32, 0U);
-  if (r < 0) goto cleanup_signal;
 
   r = sd_bus_message_open_container(reply, 'a', "{sv}");
-  if (r < 0) goto cleanup_signal;
+  if (r < 0) goto cleanup;
 
-  r = sd_bus_message_open_container(reply, 'e', "sv");
-  if (r < 0) goto cleanup_signal;
-  r = sd_bus_message_append(reply, SD_BUS_TYPE_STRING, "failed_barriers");
-  if (r < 0) goto cleanup_signal;
-  r = sd_bus_message_open_container(reply, 'v', "au");
-  if (r < 0) goto cleanup_signal;
-  r = sd_bus_message_open_container(reply, 'a', "u");
-  if (r < 0) goto cleanup_signal;
-
-  struct Barrier *b = failed_barriers_list;
-  while (b) {
-    sd_bus_message_append(reply, "u", b->id);
-    b = b->next;
+  if (failed_barriers_list) {
+    r = sd_bus_message_open_container(reply, 'e', "sv");
+    if (r < 0) goto cleanup;
+    r = sd_bus_message_append(reply, "s", "failed_barriers");
+    if (r < 0) goto cleanup;
+    r = sd_bus_message_open_container(reply, 'v', "au");
+    if (r < 0) goto cleanup;
+    r = sd_bus_message_open_container(reply, 'a', "u");
+    if (r < 0) goto cleanup;
+  
+    struct Barrier *iter = failed_barriers_list;
+    while (iter) {
+      sd_bus_message_append(reply, "u", iter->id);
+      iter = iter->next;
+    }
+    r = sd_bus_message_close_container(reply);
+    if (r < 0) goto cleanup;
+    r = sd_bus_message_close_container(reply);
+    if (r < 0) goto cleanup;
+    r = sd_bus_message_close_container(reply);
+    if (r < 0) goto cleanup;
   }
 
-  r = sd_bus_message_close_container(reply);
-  if (r < 0) goto cleanup_signal;
-  r = sd_bus_message_close_container(reply);
-  if (r < 0) goto cleanup_signal;
-  r = sd_bus_message_close_container(reply);
-  if (r < 0) goto cleanup_signal;
   r = sd_bus_message_close_container(reply); 
-  if (r < 0) goto cleanup_signal;
+  if (r < 0) goto cleanup;
 
-  r = sd_bus_send(bus, reply, NULL);
-  logprint(DEBUG, "SetPointerBarriers: Sent Response signal to %s", request_path);
+  r = sd_bus_send(sd_bus_message_get_bus(m), reply, NULL);
 
-cleanup_signal:
-  sd_bus_message_unref(reply);
 cleanup:
-  if (sender) free(sender);
-  if (request_path) free(request_path);
+  sd_bus_message_unref(reply);
   free_barrier_list(failed_barriers_list);
   return r;
 }
 
 static int dbus_method_Enable(sd_bus_message *m, void *userdata, sd_bus_error *ret_error) {
-  const char *session_handle;
   int r;
-  r = sd_bus_message_read(m, SD_BUS_TYPE_OBJECT_PATH, &session_handle);
+  const char *session_handle = NULL;
+  const char *app_id = NULL;
+  sd_bus_message *reply = NULL;
+  struct SessionContext *context = NULL;
+
+  r = sd_bus_message_read(m, "os", &session_handle, &app_id);
   if (r < 0) return r;
 
   r = dbus_helper_drain_dict(m);
   if (r < 0) return r;
 
-  struct SessionContext *context = eis_helper_find_session(session_handle);
+  context = eis_helper_find_session(session_handle);
   if (!context) {
     sd_bus_error_setf(ret_error, "org.freedesktop.portal.Error.NotFound", "session_handle %s not found", session_handle);
     return -ENOENT;
   }
-
-  logprint(DEBUG, "Enable call with session_handle %s", session_handle);
-
-  if (context->enabled) {
-    return sd_bus_reply_method_return(m, VOID_RETURN);
-  }
   
-  if (interface_data.active_session) {
-    sd_bus_error_setf(ret_error, "org.freedesktop.portal.Error.Failed", "Another session is already active");
+  if (context->enabled) {
+    logprint(DEBUG, "Session %s already enabled", session_handle);
+    goto send_reply;
+  }
+
+  // exclusivity check - only one active session at a time
+  if (interface_data.active_session != NULL) {
+    sd_bus_error_setf(ret_error, "org.freedesktop.portal.Error.Failed", "Another input capture is already active");
     return -EBUSY;
   }
-  
+
   if (!interface_data.wl_compositor || !interface_data.wl_layer_shell ||
       !interface_data.wl_seat || !interface_data.wl_pointer_constraints ||
       !interface_data.wl_keyboard_shortcuts_manager) {
@@ -875,30 +767,22 @@ static int dbus_method_Enable(sd_bus_message *m, void *userdata, sd_bus_error *r
     return -EOPNOTSUPP;
   }
 
+  logprint(DEBUG, "Enabling Input Capture for session %s (app: %s)", session_handle, app_id);
+
+
   if (context->capabilities & 2) {
     context->wl_pointer = wl_seat_get_pointer(interface_data.wl_seat);
-    if (!context->wl_pointer) {
-      sd_bus_error_setf(ret_error, "org.freedesktop.portal.Error.Failed", "Failed to get wl_pointer");
-      r = -EIO;
-      goto cleanup_fail;
-    }
-    wl_pointer_add_listener(context->wl_pointer, &pointer_listener, context);
+    if (context->wl_pointer) wl_pointer_add_listener(context->wl_pointer, &pointer_listener, context);
   }
   if (context->capabilities & 1) {
     context->wl_keyboard = wl_seat_get_keyboard(interface_data.wl_seat);
-    if (!context->wl_keyboard) {
-      sd_bus_error_setf(ret_error, "org.freedesktop.portal.Error.Failed", "Failed to get wl_keyboard");
-      r = -EIO;
-      goto cleanup_fail;
-    }
-    wl_keyboard_add_listener(context->wl_keyboard, &keyboard_listener, context);
+    if (context->wl_keyboard) wl_keyboard_add_listener(context->wl_keyboard, &keyboard_listener, context);
   }
   
   context->wl_surface = wl_compositor_create_surface(interface_data.wl_compositor);
   if (!context->wl_surface) {
-    sd_bus_error_setf(ret_error, "org.freedesktop.portal.Error.Failed", "Failed to create wl_surface");
-    r = -EIO;
-    goto cleanup_fail;
+    cleanup_session_wayland(context);
+    return -ENOMEM;
   }
   
   context->wl_layer_surface = zwlr_layer_shell_v1_get_layer_surface(
@@ -909,18 +793,16 @@ static int dbus_method_Enable(sd_bus_message *m, void *userdata, sd_bus_error *r
     "input-capture-portal"
   );
   if (!context->wl_layer_surface) {
-    sd_bus_error_setf(ret_error, "org.freedesktop.portal.Error.Failed", "Failed to create wl_layer_surface");
-    r = -EIO;
-    goto cleanup_fail;
+    cleanup_session_wayland(context);
+    return -ENOENT;
   }
 
   zwlr_layer_surface_v1_add_listener(context->wl_layer_surface, &layer_surface_listener, context);
-  zwlr_layer_surface_v1_set_anchor(context->wl_layer_surface, ZWLR_LAYER_SURFACE_V1_ANCHOR_TOP | ZWLR_LAYER_SURFACE_V1_ANCHOR_LEFT | ZWLR_LAYER_SURFACE_V1_ANCHOR_RIGHT | ZWLR_LAYER_SURFACE_V1_ANCHOR_BOTTOM);
+  zwlr_layer_surface_v1_set_anchor(context->wl_layer_surface, ZWLR_LAYER_SURFACE_V1_ANCHOR_TOP | ZWLR_LAYER_SURFACE_V1_ANCHOR_LEFT | ZWLR_LAYER_SURFACE_V1_ANCHOR_RIGHT | ZWLR_LAYER_SURFACE_V1_ANCHOR_BOTTOM);  
   zwlr_layer_surface_v1_set_size(context->wl_layer_surface, 0, 0);
-  wl_surface_set_input_region(context->wl_surface, NULL);
-  
+
   if (context->capabilities & 1) {
-    zwlr_layer_surface_v1_set_keyboard_interactivity(context->wl_layer_surface, 1);
+    zwlr_layer_surface_v1_set_keyboard_interactivity(context->wl_layer_surface, ZWLR_LAYER_SURFACE_V1_KEYBOARD_INTERACTIVITY_EXCLUSIVE);
   }
   
   wl_surface_commit(context->wl_surface);
@@ -931,34 +813,45 @@ static int dbus_method_Enable(sd_bus_message *m, void *userdata, sd_bus_error *r
       context->wl_surface,
       interface_data.wl_seat
     );
-    if (!context->wl_keyboard_inhibitor) {
-      sd_bus_error_setf(ret_error, "org.freedesktop.portal.Error.Failed", "Failed to create keyboard inhibitor");
-      r = -EIO;
-      goto cleanup_fail;
+    if (context->wl_keyboard_inhibitor) {
+      zwp_keyboard_shortcuts_inhibitor_v1_add_listener(
+        context->wl_keyboard_inhibitor,
+        &inhibitor_listener,
+        context
+      );
     }
-    zwp_keyboard_shortcuts_inhibitor_v1_add_listener(
-      context->wl_keyboard_inhibitor,
-      &inhibitor_listener,
-      context
-    );
   }
   
   wl_display_roundtrip(interface_data.wl_display);
   
   context->enabled = true;
   interface_data.active_session = context;
-  
-  return sd_bus_reply_method_return(m, VOID_RETURN);
 
-cleanup_fail:
-  cleanup_session_wayland(context);
+  dbus_signal_Activated(interface_data.bus, session_handle);
+
+send_reply:
+  r = sd_bus_message_new_method_return(m, &reply);
+  if (r < 0) return r;
+
+  r = sd_bus_message_append(reply, "u", 0U);
+  if (r < 0) goto cleanup_reply;
+
+  r = sd_bus_message_open_container(reply, 'a', "{sv}");
+  if (r < 0) goto cleanup_reply;
+  r = sd_bus_message_close_container(reply);
+  if (r < 0) goto cleanup_reply;
+  
+  r = sd_bus_send(sd_bus_message_get_bus(m), reply, NULL);
+
+cleanup_reply:
+  sd_bus_message_unref(reply);
   return r;
 }
 
 static void cleanup_session_wayland(struct SessionContext *context) {
   if (!context) return;
 
-  logprint(DEBUG, "cleaning up wayland resources for session %s", context->session_path);
+  logprint(DEBUG, "cleaning up wayland resources for session %s", (context->session_handle) ? context->session_handle : "UNKNOWN");
 
   if (context->wl_keyboard_inhibitor) {
     zwp_keyboard_shortcuts_inhibitor_v1_destroy(context->wl_keyboard_inhibitor);
@@ -998,48 +891,143 @@ static void cleanup_session_wayland(struct SessionContext *context) {
 }
 
 static int dbus_method_Disable(sd_bus_message *m, void *userdata, sd_bus_error *ret_error) {
-  const char *session_handle;
-  int r;
-  r = sd_bus_message_read(m, SD_BUS_TYPE_OBJECT_PATH, &session_handle);
+int r;
+  const char *session_handle = NULL;
+  const char *app_id = NULL;
+  sd_bus_message *reply = NULL;
+  struct SessionContext *context = NULL;
+
+  r = sd_bus_message_read(m, "os", &session_handle, &app_id);
   if (r < 0) return r;
 
   r = dbus_helper_drain_dict(m);
   if (r < 0) return r;
 
-  struct SessionContext *context = eis_helper_find_session(session_handle);
+  context = eis_helper_find_session(session_handle);
   if (!context) {
     sd_bus_error_setf(ret_error, "org.freedesktop.portal.Error.NotFound", "session_handle %s not found", session_handle);
     return -ENOENT;
   }
 
-  logprint(DEBUG, "Disable call with session_handle %s", session_handle);
+  logprint(DEBUG, "Disabling Input Capture for session %s (app: %s)", session_handle, app_id);
+  
   if (!context->enabled) {
-    return sd_bus_reply_method_return(m, VOID_RETURN);
+    logprint(DEBUG, "Session %s is already disabled", session_handle);
+    goto send_reply;
   }
 
   cleanup_session_wayland(context);
 
-  interface_data.active_session = NULL;
   context->enabled = false;
 
-  dbus_signal_Deactivated(interface_data.bus, context->session_path);
+  if (interface_data.active_session == context) {
+    interface_data.active_session = NULL;
+  }
 
-  return sd_bus_reply_method_return(m, VOID_RETURN);
+  dbus_signal_Deactivated(interface_data.bus, session_handle);
+
+send_reply:
+  r = sd_bus_message_new_method_return(m, &reply);
+  if (r < 0) return r;
+
+  r = sd_bus_message_append(reply, "u", 0U);
+  if (r < 0) goto cleanup_reply;
+
+  r = sd_bus_message_open_container(reply, 'a', "{sv}");
+  if (r < 0) goto cleanup_reply;
+  r = sd_bus_message_close_container(reply);
+  if (r < 0) goto cleanup_reply;
+
+  r = sd_bus_send(sd_bus_message_get_bus(m), reply, NULL);
+
+cleanup_reply:
+  sd_bus_message_unref(reply);
+  return r;
+}
+
+static int dbus_helper_parse_Release_options(sd_bus_message *m, uint32_t *activation_id, double *cursor_position_x, double *cursor_position_y) {
+  int r;
+
+  r = sd_bus_message_enter_container(m, 'a', "{sv}");
+  if (r < 0) {
+    logprint(ERROR, "Error entering container: %s", strerror(-r));
+    return r;
+  }
+
+  while (sd_bus_message_at_end(m, 0) == 0) {
+    const char *key;
+
+    r = sd_bus_message_enter_container(m, 'e', "sv");
+    if (r < 0) {
+      logprint(ERROR, "Failed to enter dict entry: %s", strerror(-r));
+      return r;
+    }
+
+    r = sd_bus_message_read(m, "s", &key);
+    if (r < 0) {
+      logprint(ERROR, "Failed to read dict key: %s", strerror(-r));
+      return r;
+    }
+
+    if (strcmp(key, "activation_id") == 0) {
+      r = sd_bus_message_read(m, "v", "u", activation_id);
+      if (r < 0) {
+        logprint(ERROR, "Failed to read activation_id's value: %s", strerror(-r));
+        return r;
+      }
+    } else if (strcmp(key, "cursor_position") == 0) {
+      r = sd_bus_message_enter_container(m, 'v', "(dd)");
+      if (r < 0) return r;
+      
+      r = sd_bus_message_enter_container(m, 'r', "dd");
+      if (r >= 0) {
+        r = sd_bus_message_read(m, "d", cursor_position_x);
+        r = sd_bus_message_read(m, "d", cursor_position_y);
+
+        sd_bus_message_exit_container(m);
+        if (r < 0) return r;
+
+      }
+    } else {
+      logprint(DEBUG, "Skipping unknown option: %s", key);
+      sd_bus_message_skip(m, "v");
+      if (r < 0) {
+        logprint(ERROR, "Failed to skip variant for key '%s': %s", key, strerror(-r));
+        return r;
+      }
+    }
+
+    r = sd_bus_message_exit_container(m);
+    if (r < 0) {
+      logprint(ERROR, "Failed to exit entry: %s", strerror(-r));
+      return r;
+    }
+  }
+
+  r = sd_bus_message_exit_container(m);
+  if (r < 0) {
+    logprint(ERROR, "Failed to exit container: %s", strerror(-r));
+    return r;
+  }
+
+  return 0;
 }
 
 static int dbus_method_Release(sd_bus_message *m, void *userdata, sd_bus_error *ret_error) {
-  (void)userdata;
-  (void)ret_error;
-
-  const char *session_handle;
   int r;
-  r = sd_bus_message_read(m, SD_BUS_TYPE_OBJECT_PATH, &session_handle);
+  const char *session_handle = NULL;
+  const char *app_id = NULL;
+  uint32_t activation_id = 0;
+  double cursor_position_x = 0, cursor_position_y = 0;
+  sd_bus_message *reply = NULL;
+
+  r = sd_bus_message_read(m, "os", &session_handle, &app_id);
   if (r < 0) {
     logprint(ERROR, "Error reading object path: %s", strerror(-r));
     return r;
   }
 
-  r = dbus_helper_drain_dict(m);
+  r = dbus_helper_parse_Release_options(m, &activation_id, &cursor_position_x, &cursor_position_y);
   if (r < 0) {
     logprint(ERROR, "Error draining dictionary: %s", strerror(-r));
     return r;
@@ -1053,46 +1041,55 @@ static int dbus_method_Release(sd_bus_message *m, void *userdata, sd_bus_error *
 
   logprint(DEBUG, "Release call with session_handle %s", session_handle);
 
-  struct SessionContext **p = &interface_data.session_list_head;
-  while (*p) {
-    if (*p == context) {
-      *p = context->next;
-      break;
-    }
-    p = &(*p)->next;
-  }
-
   if (context->enabled) {
     cleanup_session_wayland(context);
-    interface_data.active_session = NULL;
+    context->enabled = false;
+
+    if (interface_data.active_session == context) interface_data.active_session = NULL;
   }
 
   if (context->device) eis_device_stop_emulating(context->device);
 
-  sd_bus_slot_unref(context->slot);
-  sc_free(context);
+  r = sd_bus_message_new_method_return(m, &reply);
+  if (r < 0) return r;
 
-  return sd_bus_reply_method_return(m, VOID_RETURN);
+  r = sd_bus_message_append(reply, "u", 0U);
+  if (r < 0) goto cleanup_reply;
+
+  r = sd_bus_message_open_container(reply, 'a', "{sv}");
+  if (r < 0) goto cleanup_reply;
+  r = sd_bus_message_close_container(reply);
+  if (r < 0) goto cleanup_reply;
+
+  r = sd_bus_send(sd_bus_message_get_bus(m), reply, NULL);
+
+cleanup_reply:
+  sd_bus_message_unref(reply);
+  return r;
 }
 
 static int dbus_method_ConnectToEIS(sd_bus_message *m, void *userdata, sd_bus_error *ret_error) {
-  const char *session_handle;
   int r;
+  const char *session_handle = NULL;
+  const char *app_id = NULL;
 
-  r = sd_bus_message_read(m, SD_BUS_TYPE_OBJECT_PATH, &session_handle);
+  struct SessionContext *context = NULL;
+  sd_bus_message *reply = NULL;
+
+  r = sd_bus_message_read(m, "os", &session_handle, &app_id);
   if (r < 0) return r;
 
   r = dbus_helper_drain_dict(m);
   if (r < 0) return r;
 
-  struct SessionContext *context = eis_helper_find_session(session_handle);
+  context = eis_helper_find_session(session_handle);
   if (!context) {
     logprint(ERROR, "Could not find session at %s session_handle", session_handle);
     sd_bus_error_setf(ret_error, "org.freedesktop.portal.Error.NotFound", "Session handle '%s' not found", session_handle);
     return -ENOENT;
   }
 
-  logprint(DEBUG, "ConnectToEIS call with session_handle %s", session_handle);
+  logprint(DEBUG, "ConnectToEIS: Setting up EIS socket for session %s (app: %s)", session_handle, app_id);
 
   int eis_fd = eis_get_fd(interface_data.eis_context);
   if (eis_fd < 0) {
@@ -1106,7 +1103,7 @@ static int dbus_method_ConnectToEIS(sd_bus_message *m, void *userdata, sd_bus_er
     sd_bus_error_setf(ret_error, SD_BUS_ERROR_FAILED, "Failed to dup EIS fd: %s", strerror(errno));
   }
 
-  return sd_bus_reply_method_return(m, SD_BUS_TYPE_UNIX_FD, client_fd);
+  return sd_bus_reply_method_return(m, "h", client_fd);
 }
 
 
@@ -1120,13 +1117,13 @@ static int dbus_helper_emit_signal(sd_bus *bus, const char *signal_name, const c
     return r;
   }
 
-  r = sd_bus_message_append(m, SD_BUS_TYPE_OBJECT_PATH, session_handle);
+  r = sd_bus_message_append(m, "o", session_handle);
   if (r < 0) {
     logprint(ERROR, "Error appending session_handle %s to %s signal message: %s", session_handle, signal_name, strerror(-r));
     goto finish;
   }
 
-  r = sd_bus_message_append(m, SD_BUS_TYPE_ARRAY SD_BUS_TYPE_DICT_ENTRY_BEGIN SD_BUS_TYPE_STRING SD_BUS_TYPE_VARIANT SD_BUS_TYPE_DICT_ENTRY_END, 0); // Passing 0 indicates an empty container
+  r = sd_bus_message_append(m, "a" "{" "s" "v" "}", 0); // Passing 0 indicates an empty container
   if (r < 0) {
     logprint(ERROR, "Error appending empty dictionary to %s signal message: %s", signal_name, strerror(-r));
     goto finish;
@@ -1165,7 +1162,7 @@ static int dbus_signal_ZonesChanged(sd_bus *bus, const char *session_handle)
 static struct SessionContext* eis_helper_find_session(const char *session_path) {
   struct SessionContext *iter = interface_data.session_list_head;
   while (iter) {
-    if (strcmp(iter->session_path, session_path) == 0) {
+    if (strcmp(iter->session_handle, session_path) == 0) {
       return iter;
     }
     iter = iter->next;
@@ -1191,7 +1188,7 @@ static void eis_helper_handle_event(struct eis_event *event) {
       client = eis_event_get_client(event);
       context = (struct SessionContext *)eis_client_get_user_data(client);
       if (context) {
-        logprint(DEBUG, "EIS client disconnected (session_path: %s)", context->session_path);
+        logprint(DEBUG, "EIS client disconnected (session_path: %s)", context->session_handle);
         eis_client_set_user_data(client, NULL);
       }
       else {
@@ -1212,7 +1209,7 @@ static void eis_helper_handle_event(struct eis_event *event) {
         eis_client_disconnect(client);
       }
       else {
-        logprint(DEBUG, "Linking EIS client to session %s", context->session_path);
+        logprint(DEBUG, "Linking EIS client to session %s", context->session_handle);
         eis_client_set_user_data(client, context);
 
         if (context->capabilities & 1) eis_seat_configure_capability(seat, EIS_DEVICE_CAP_KEYBOARD);
@@ -1220,7 +1217,7 @@ static void eis_helper_handle_event(struct eis_event *event) {
         if (context->capabilities & 4) eis_seat_configure_capability(seat, EIS_DEVICE_CAP_TOUCH);
         eis_seat_add(seat);
 
-        logprint(DEBUG, "Creating new virtual device for session %s", context->session_path);
+        logprint(DEBUG, "Creating new virtual device for session %s", context->session_handle);
         struct eis_device *device = eis_seat_new_device(seat);
         context->device = device;
 
@@ -1348,13 +1345,13 @@ static void wayland_handle_seat_name(void *data, struct wl_seat *seat, const cha
 static void wayland_handle_inhibitor_active(void *data, struct zwp_keyboard_shortcuts_inhibitor_v1 *inhibitor) {
   struct SessionContext *context = (struct SessionContext *)data;
   logprint(DEBUG, "Wayland: Keyboard inhibitor ACTIVE");
-  dbus_signal_Activated(interface_data.bus, context->session_path);
+  dbus_signal_Activated(interface_data.bus, context->session_handle);
 }
 
 static void wayland_handle_inhibitor_inactive(void *data, struct zwp_keyboard_shortcuts_inhibitor_v1 *inhibitor) {
   struct SessionContext *context = (struct SessionContext *)data;
   logprint(DEBUG, "Wayland: keyboard inhibitor INACTIVE");
-  dbus_signal_Deactivated(interface_data.bus, context->session_path);
+  dbus_signal_Deactivated(interface_data.bus, context->session_handle);
 }
 
 static void wayland_handle_layer_surface_configure(void *data, struct zwlr_layer_surface_v1 *surface, uint32_t serial, uint32_t w, uint32_t h) {
@@ -1370,7 +1367,7 @@ static void wayland_handle_layer_surface_closed(void *data, struct zwlr_layer_su
   cleanup_session_wayland(state);
   state->enabled = false;
   interface_data.active_session = NULL;
-  dbus_signal_Deactivated(interface_data.bus, state->session_path);
+  dbus_signal_Deactivated(interface_data.bus, state->session_handle);
 }
 
 static void wayland_handle_pointer_enter(void *data, struct wl_pointer *ptr, uint32_t serial,
@@ -1550,7 +1547,7 @@ static void output_handle_done(void *data, struct wl_output *wl_output) {
       // invalidate the clients current zone_set_id and notify them
       // the spec says to increment by a "sensible amount"
       iter->zone_set_id += 1;
-      dbus_signal_ZonesChanged(output->data->bus, iter->session_path);
+      dbus_signal_ZonesChanged(output->data->bus, iter->session_handle);
     }
     iter = iter->next;
   }
