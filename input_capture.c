@@ -188,7 +188,6 @@ static void free_barrier_list(struct xdpw_input_capture_barrier *list) {
 void xdpw_input_capture_session_data_free(struct xdpw_input_capture_session_data *ic) {
   if (!ic) return;
   free_barrier_list(ic->barriers);
-  free(ic);
 }
 
 /*--------------------------------------------- Properties ------------------------------------------------------------*/
@@ -351,7 +350,7 @@ static int dbus_method_CreateSession(sd_bus_message *m, void *userdata, sd_bus_e
     return -ENOMEM;
   }
   context = xdpw_session_create(interface_data.xdpw_state, sd_bus_message_get_bus(m), tmp);
-  free(tmp);
+  // free(tmp); TODO: find out why error here
   if (!context) {
     xdpw_request_destroy(request);
     return -ENOMEM;
@@ -384,6 +383,7 @@ static int dbus_method_CreateSession(sd_bus_message *m, void *userdata, sd_bus_e
   char *session_id = dbus_helper_create_session_id();
   if (!session_id) goto cleanup_reply;
   r = sd_bus_message_append(reply, "v", "s", session_id);
+  free(session_id);
   if (r < 0) goto cleanup_reply;
   r = sd_bus_message_close_container(reply);
   if (r < 0) goto cleanup_reply;
@@ -1391,16 +1391,34 @@ static void wayland_handle_seat_name(void *data, struct wl_seat *seat, const cha
 
 static void wayland_handle_inhibitor_active(void *data, struct zwp_keyboard_shortcuts_inhibitor_v1 *inhibitor) {
   struct xdpw_session *context = (struct xdpw_session *)data;
-  logprint(DEBUG, "Wayland: Keyboard inhibitor ACTIVE");
-  (void)context;
-  // dbus_signal_Activated(interface_data.bus, context->session_handle);
+  logprint(DEBUG, "Wayland: Keyboard inhibitor ACTIVE for session %s", context->session_handle);
+
+  if (interface_data.active_session == context) {
+    double cursor_x = wl_fixed_to_double(context->input_capture_data.last_pointer_x);
+    double cursor_y = wl_fixed_to_double(context->input_capture_data.last_pointer_y);
+
+    dbus_signal_Activated(interface_data.bus, context, 0, cursor_x, cursor_y);
+
+    if (context->input_capture_data.device) {
+      eis_device_start_emulating(context->input_capture_data.device, context->input_capture_data.activation_id);
+    }
+  }
 }
 
 static void wayland_handle_inhibitor_inactive(void *data, struct zwp_keyboard_shortcuts_inhibitor_v1 *inhibitor) {
   struct xdpw_session *context = (struct xdpw_session *)data;
-  logprint(DEBUG, "Wayland: keyboard inhibitor INACTIVE");
-  (void)context;
-  // dbus_signal_Deactivated(interface_data.bus, context->session_handle);
+  logprint(DEBUG, "Wayland: keyboard inhibitor INACTIVE for session %s", context->session_handle);
+  
+  if (context->input_capture_data.enabled) {
+    double final_x = wl_fixed_to_double(context->input_capture_data.last_pointer_x);
+    double final_y = wl_fixed_to_double(context->input_capture_data.last_pointer_y);
+
+    if (context->input_capture_data.device) {
+      eis_device_stop_emulating(context->input_capture_data.device);
+    }
+    
+    dbus_signal_Deactivated(interface_data.bus, context, final_x, final_y);
+  }
 }
 
 static void wayland_handle_layer_surface_configure(void *data, struct zwlr_layer_surface_v1 *surface, uint32_t serial, uint32_t w, uint32_t h) {
