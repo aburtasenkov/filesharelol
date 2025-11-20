@@ -8,33 +8,34 @@
 #include <wayland-util.h>
 #include <xkbcommon/xkbcommon.h>
 
-#include "wlr-layer-shell-unstable-v1-client.h"
-#include "pointer-constraints-unstable-v1-client.h"
-#include "keyboard-shortcuts-inhibit-unstable-v1-client.h"
+#include "wlr-layer-shell-unstable-v1-client-protocol.h"
+#include "pointer-constraints-unstable-v1-client-protocol.h"
+#include "keyboard-shortcuts-inhibit-unstable-v1-client-protocol.h"
 
 #include <stdbool.h>
 
-struct Barrier {
+struct xdpw_input_capture_barrier {
   uint32_t id;
   int32_t x1, y1, x2, y2;
-  struct Barrier *next;
+  struct xdpw_input_capture_barrier *next;
 };
 
-struct Output {
+struct xdpw_input_capture_output {
   struct wl_list link;
-  struct InputCaptureData *data;
+  struct xdpw_input_capture_data *data;
   uint32_t name;
   struct wl_output *wl_output;
   int32_t x, y, width, height;
   bool ready;
 };
 
-struct InputCaptureData {
+struct xdpw_input_capture_data {
+  struct xdpw_state *xdpw_state;
+
   uint32_t capabilities;
   uint32_t version;
   sd_bus *bus;
   struct eis *eis_context;
-  struct SessionContext *session_list_head; // pointer pointing to head of a single sided linked list
 
   struct wl_display *wl_display;
   struct wl_registry *wl_registry;
@@ -47,40 +48,11 @@ struct InputCaptureData {
   
   struct xkb_context *xkb_context;  // global XKB context
 
-  struct SessionContext *active_session;  // pointer to the currently capturing session
+  struct xdpw_session *active_session;  // pointer to the currently capturing session
 
   struct wl_list output_list;
 };
 
-struct SessionContext {
-  sd_bus_slot *slot;
-  char *session_path;
-  char *parent_window;
-  char *handle_token;
-  char *session_handle_token;
-  uint32_t capabilities;
-  struct SessionContext *next;  // pointer to next SessionContext object
-  bool enabled;
-  struct eis_device *device;
-  
-  uint32_t zone_set_id;
-  struct Barrier *barriers; // Linked list of active barriers
-
-  struct wl_surface *wl_surface;
-  struct zwlr_layer_surface_v1 *wl_layer_surface; 
-
-  struct wl_pointer *wl_pointer;
-  struct wl_keyboard *wl_keyboard;
-  struct zwp_locked_pointer_v1 *wl_locked_pointer;
-  struct zwp_keyboard_shortcuts_inhibitor_v1 *wl_keyboard_inhibitor;
-
-  // for manual pointer delta calculation
-  wl_fixed_t last_pointer_x;
-  wl_fixed_t last_pointer_y;
-
-  // for keyboard state
-  struct xkb_keymap *xkb_keymap;
-  struct xkb_state *xkb_state;
-};
-
 int xdpw_input_capture_init(struct xdpw_state *);
+void xdpw_input_capture_destroy(void);
+void xdpw_input_capture_dispatch_eis(struct xdpw_state *);
