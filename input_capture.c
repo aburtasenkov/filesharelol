@@ -235,6 +235,8 @@ static int dbus_helper_drain_dict(sd_bus_message *m) {
 static int dbus_helper_parse_CreateSession_options(sd_bus_message *m, uint32_t *capabilities) {
   int r;
 
+  logprint(DEBUG, "IM HERE");
+
   r = sd_bus_message_enter_container(m, 'a', "{sv}");
   if (r < 0) {
     logprint(ERROR, "Error entering container: %s", strerror(-r));
@@ -787,6 +789,10 @@ static int dbus_method_Enable(sd_bus_message *m, void *userdata, sd_bus_error *r
 
   if (context->input_capture_data.device) {
     eis_device_start_emulating(context->input_capture_data.device, context->input_capture_data.activation_id);
+    eis_device_frame(context->input_capture_data.device, eis.now());
+
+    eis_device_pointer_motion(device, 100, 100);
+    eis_device_frame(device, eis.now());
   }
 
 send_reply:
