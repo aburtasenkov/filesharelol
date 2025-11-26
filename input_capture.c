@@ -779,17 +779,14 @@ static int dbus_method_Enable(sd_bus_message *m, void *userdata, sd_bus_error *r
   context->input_capture_data.enabled = true;
   interface_data.active_session = context;
 
-  // double cursor_x = wl_fixed_to_double(context->input_capture_data.last_pointer_x);
-  // double cursor_y = wl_fixed_to_double(context->input_capture_data.last_pointer_y);
+  double cursor_x = wl_fixed_to_double(context->input_capture_data.last_pointer_x);
+  double cursor_y = wl_fixed_to_double(context->input_capture_data.last_pointer_y);
 
-  // dbus_signal_Activated(interface_data.bus, context, 0, cursor_x, cursor_y);
+  dbus_signal_Activated(interface_data.bus, context, 0, cursor_x, cursor_y);
 
-  // if (context->input_capture_data.device) {
-  //   eis_device_start_emulating(context->input_capture_data.device, context->input_capture_data.activation_id);
-  // }
-
-  context->input_capture_data.activation_pending = true;
-  logprint(DEBUG, "Enable: Waiting for Wayland pointer entry to activate session");
+  if (context->input_capture_data.device) {
+    eis_device_start_emulating(context->input_capture_data.device, context->input_capture_data.activation_id);
+  }
 
 send_reply:
   r = sd_bus_message_new_method_return(m, &reply);
@@ -1443,28 +1440,6 @@ static void wayland_handle_pointer_enter(void *data, struct wl_pointer *ptr, uin
                                         struct wl_surface *surface, wl_fixed_t sx, wl_fixed_t sy) {
   struct xdpw_session *context = (struct xdpw_session *)data;
   logprint(DEBUG, "Wayland pointer entered surface");
-  
-  // store initial position for delta calculation
-  context->input_capture_data.last_pointer_x = sx;
-  context->input_capture_data.last_pointer_y = sy;
-
-  if (context->input_capture_data.activation_pending) {
-    logprint(DEBUG, "Pointer entered: Activating Input Capture Session now");
-
-    double cursor_x = wl_fixed_to_double(sx);
-    double cursor_y = wl_fixed_to_double(sy);
-
-    // emit the dbus signal now that we have valid coordinates
-
-    dbus_signal_Activated(interface_data.bus, context, 0, cursor_x, cursor_y);
-
-    // start eis emulation using the ID incremented by the signal helper
-    if (context->input_capture_data.device) {
-      eis_device_start_emulating(context->input_capture_data.device, context->input_capture_data.activation_id);
-    }
-
-    context->input_capture_data.activation_pending = false;
-  }
 
   if (interface_data.wl_pointer_constraints && !context->input_capture_data.wl_locked_pointer) {
     context->input_capture_data.wl_locked_pointer = zwp_pointer_constraints_v1_lock_pointer(
@@ -1477,21 +1452,13 @@ static void wayland_handle_pointer_enter(void *data, struct wl_pointer *ptr, uin
     zwp_locked_pointer_v1_add_listener(context->input_capture_data.wl_locked_pointer, &locked_pointer_listener, context);
   }
 
+  // store initial position for delta calculation
+  context->input_capture_data.last_pointer_x = sx;
+  context->input_capture_data.last_pointer_y = sy;
 }
 
 static void wayland_handle_pointer_leave(void *data, struct wl_pointer *ptr, uint32_t serial, struct wl_surface *surface) {
-  struct xdpw_session *context = (struct xdpw_session *)data;
   logprint(DEBUG, "Wayland: pointer left surface");
-
-  // destroy the pointer lock
-  if (context->input_capture_data.wl_locked_pointer) {
-    zwp_locked_pointer_v1_destroy(context->input_capture_data.wl_locked_pointer);
-    context->input_capture_data.wl_locked_pointer = NULL;
-  }
-
-  if (context->input_capture_data.enabled && context->input_capture_data.device) {
-    eis_device_stop_emulating(context->input_capture_data.device);
-  }
 }
 
 static void wayland_handle_pointer_motion(void *data, struct wl_pointer *ptr, uint32_t time, wl_fixed_t sx, wl_fixed_t sy) {
